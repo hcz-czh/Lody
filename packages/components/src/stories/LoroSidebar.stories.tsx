@@ -7,6 +7,7 @@ import {
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragStartEvent,
 } from '@dnd-kit/core';
 import {
   arrayMove,
@@ -1033,6 +1034,7 @@ function DemoProjectSection({
   machineDragHandle,
   collapsedProjects,
   onToggleCollapsed,
+  onCollapseProject,
   onToggleProjectCollapsed,
   onProjectsChange,
   sessionsByProjectKey,
@@ -1048,6 +1050,7 @@ function DemoProjectSection({
   machineDragHandle?: ReactNode;
   collapsedProjects: Record<string, boolean>;
   onToggleCollapsed: () => void;
+  onCollapseProject: (projectKey: string) => void;
   onToggleProjectCollapsed: (projectKey: string) => void;
   onProjectsChange: (projects: LocalProjectMeta[]) => void;
   sessionsByProjectKey: Record<string, SessionMeta[]>;
@@ -1060,6 +1063,11 @@ function DemoProjectSection({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
   const projectIds = projects.map((project) => String(project.id));
+  const handleDragStart = (event: DragStartEvent) => {
+    const projectId = String(event.active.id);
+    if (!projectIds.includes(projectId)) return;
+    onCollapseProject(`${machineId}:${projectId}`);
+  };
   const handleDragEnd = (event: DragEndEvent) => {
     const overId = event.over?.id;
     if (!overId) return;
@@ -1092,7 +1100,12 @@ function DemoProjectSection({
         }
       />
       {collapsed ? null : (
-        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+        >
           <SortableContext items={projectIds} strategy={verticalListSortingStrategy}>
             <div className="space-y-1">
               {projects.map((project) => {
@@ -1221,6 +1234,10 @@ function ProductionLikeTopContent({
     if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
     setRemoteProjectSections((sections) => arrayMove(sections, fromIndex, toIndex));
   };
+  const collapseProject = (projectKey: string) =>
+    setCollapsedProjects((prev) =>
+      prev[projectKey] === true ? prev : { ...prev, [projectKey]: true }
+    );
   const toggleProjectCollapsed = (projectKey: string) =>
     setCollapsedProjects((prev) => ({ ...prev, [projectKey]: !(prev[projectKey] ?? false) }));
   const toggleSectionCollapsed = (sectionKey: string) =>
@@ -1274,6 +1291,7 @@ function ProductionLikeTopContent({
         collapsed={collapsedSections[demoMachineId] ?? false}
         collapsedProjects={collapsedProjects}
         onToggleCollapsed={() => toggleSectionCollapsed(demoMachineId)}
+        onCollapseProject={collapseProject}
         onToggleProjectCollapsed={toggleProjectCollapsed}
         onProjectsChange={setLocalProjects}
         sessionsByProjectKey={projectSessionsByKey}
@@ -1304,6 +1322,7 @@ function ProductionLikeTopContent({
                   machineDragHandle={machineDragHandle}
                   collapsedProjects={collapsedProjects}
                   onToggleCollapsed={() => toggleSectionCollapsed(section.machineId)}
+                  onCollapseProject={collapseProject}
                   onToggleProjectCollapsed={toggleProjectCollapsed}
                   onProjectsChange={(projects) =>
                     setRemoteProjectSections((sections) =>

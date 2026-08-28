@@ -7,6 +7,7 @@ import {
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragStartEvent,
 } from '@dnd-kit/core';
 import {
   arrayMove,
@@ -2294,6 +2295,18 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
     },
     [remoteSectionIds, setLocalProjectSidebarOrder]
   );
+  const handleProjectDragStart = useCallback(
+    (machineId: MachineId, projectIds: readonly string[], event: DragStartEvent) => {
+      const projectId = String(event.active.id);
+      if (!projectIds.includes(projectId)) return;
+
+      const projectKey = `${machineId}:${projectId}`;
+      setLocalProjectCollapseState((prev) =>
+        prev[projectKey] === true ? prev : { ...prev, [projectKey]: true }
+      );
+    },
+    [setLocalProjectCollapseState]
+  );
   const handleProjectDragEnd = useCallback(
     (machineId: MachineId, projectIds: readonly string[], event: DragEndEvent) => {
       const overId = event.over?.id;
@@ -2408,6 +2421,9 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
                       <DndContext
                         sensors={sidebarOrderSensors}
                         collisionDetection={closestCenter}
+                        onDragStart={(event) =>
+                          handleProjectDragStart(section.machineId!, projectIds, event)
+                        }
                         onDragEnd={(event) =>
                           handleProjectDragEnd(section.machineId!, projectIds, event)
                         }
