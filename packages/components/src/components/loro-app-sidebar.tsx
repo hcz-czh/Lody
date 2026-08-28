@@ -765,6 +765,7 @@ const LocalProjectSessionItem = memo(function LocalProjectSessionItem({
         {/* ④ Fixed end slot: the PR status sits here at rest when the session
             has one, with a faint worktree glyph just to its left; the Archive
             button replaces it on desktop hover. */}
+        {dragHandle}
         <SidebarRowEndSlot
           restIcon={
             showPr || showWorktreeIcon ? (
@@ -784,7 +785,6 @@ const LocalProjectSessionItem = memo(function LocalProjectSessionItem({
             ) : undefined
           }
         />
-        {dragHandle}
       </div>
     </div>
   );

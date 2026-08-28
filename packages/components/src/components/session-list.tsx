@@ -592,9 +592,11 @@ export function SortableSidebarOrderItem({
     typeof children === 'function' ? (
       children(dragHandle)
     ) : (
-      <div className="group flex min-w-0 items-center">
+      <div className="group relative flex min-w-0 items-center">
         <div className="min-w-0 flex-1">{children}</div>
-        {dragHandle}
+        {dragHandle ? (
+          <span className="absolute right-9 top-1/2 -translate-y-1/2">{dragHandle}</span>
+        ) : null}
       </div>
     );
 
