@@ -65,6 +65,7 @@ import {
   sidebarShowFullListAtom,
   toggleSidebarCollapsedOpenedBySessionAtom,
 } from '@/atoms/focus-layer';
+import { reconcileVisibleSidebarOrder, type SidebarSessionOrder } from '@/atoms/sidebar-state';
 import {
   buildOpenedBySessionTree,
   countOpenedByTreeRoots,
@@ -164,6 +165,15 @@ export type SessionListRepoMove = {
   nextRepos: SessionListRepoState[];
 };
 
+export type SessionListSessionMove = {
+  groupKey: string;
+  activeSessionId: string;
+  overSessionId: string;
+  fromIndex: number;
+  toIndex: number;
+  nextSessionIds: string[];
+};
+
 export type SessionListPullRequestOpen = {
   sessionId: string;
   repoFullName: string | null;
@@ -199,6 +209,9 @@ export type SessionListProps = {
   onShareSessionWithTeam?: (sessionId: string) => void;
   onNew?: (repoFullName?: string) => void;
   onMoveRepo?: (move: SessionListRepoMove) => void;
+  /** Per-group client-side order for top-level sessions. */
+  sessionOrderByGroupKey?: SidebarSessionOrder;
+  onMoveSession?: (move: SessionListSessionMove) => void;
   onOpenPullRequest?: (request: SessionListPullRequestOpen) => void;
   /** Navigate to new session page with the given repo pre-selected (or chat mode if undefined) */
   onNavigateToNewSession?: (repoFullName?: string) => void;
@@ -224,6 +237,7 @@ export type SessionRowGroup = {
   repoFullName: string | null;
   collapsed: boolean;
   sessions: SessionListRow[];
+  manualOrder?: boolean;
 };
 
 export const MAX_VISIBLE_SESSIONS = 5;
@@ -259,7 +273,7 @@ export function getVisibleSessionGroupTree(
   return buildOpenedBySessionTree(group.sessions, {
     ...SESSION_ROW_OPENED_BY_TREE_ACCESSORS,
     isCollapsed: (openerId) => collapsedOpenedBySessionIds?.[openerId] === true,
-    rootRank: sessionRowRootRank,
+    ...(group.manualOrder ? {} : { rootRank: sessionRowRootRank }),
     ...(whetherShowFullList ? {} : { maxRoots: MAX_VISIBLE_SESSIONS }),
   });
 }
@@ -353,8 +367,27 @@ export function buildGroups(
   sessions: SessionListRow[],
   repos: SessionListRepoState[],
   chatsCollapsed: boolean,
-  chatsLabel: string = 'Chats'
+  chatsLabel: string = 'Chats',
+  sessionOrderByGroupKey: SidebarSessionOrder = {}
 ): SessionRowGroup[] {
+  const orderGroupSessions = (groupKey: string, groupSessions: SessionListRow[]) => {
+    const sorted = sortSessionRowsByLatestMessage(groupSessions);
+    const pinned = sorted.filter((session) => session.isPinned);
+    const unpinned = sorted.filter((session) => !session.isPinned);
+    const savedIds = sessionOrderByGroupKey[groupKey];
+    if (!savedIds) return sorted;
+    const byId = new Map(unpinned.map((session) => [session.sessionId, session]));
+    return [
+      ...pinned,
+      ...reconcileVisibleSidebarOrder(
+        savedIds,
+        unpinned.map((session) => session.sessionId)
+      ).flatMap((sessionId) => {
+        const session = byId.get(sessionId);
+        return session ? [session] : [];
+      }),
+    ];
+  };
   const sessionsByRepo = new Map<string, SessionListRow[]>();
   const onlyChats: SessionListRow[] = [];
 
@@ -378,7 +411,8 @@ export function buildGroups(
       kind: 'chat',
       repoFullName: null,
       collapsed: chatsCollapsed,
-      sessions: sortSessionRowsByLatestMessage(onlyChats),
+      sessions: orderGroupSessions(ONLY_CHATS_KEY, onlyChats),
+      manualOrder: sessionOrderByGroupKey[ONLY_CHATS_KEY] !== undefined,
     });
   }
 
@@ -395,7 +429,8 @@ export function buildGroups(
       kind: 'repo',
       repoFullName: repoName,
       collapsed: repo.collapsed,
-      sessions: sortSessionRowsByLatestMessage(repoSessions),
+      sessions: orderGroupSessions(repoName, repoSessions),
+      manualOrder: sessionOrderByGroupKey[repoName] !== undefined,
     });
   }
 
@@ -411,7 +446,8 @@ export function buildGroups(
       kind: 'repo',
       repoFullName,
       collapsed: false,
-      sessions: sortSessionRowsByLatestMessage(repoSessions),
+      sessions: orderGroupSessions(repoFullName, repoSessions),
+      manualOrder: sessionOrderByGroupKey[repoFullName] !== undefined,
     });
   }
 
@@ -496,6 +532,109 @@ function sessionGroupPropsEqual<
   return !contains(prev.selectedSessionId) && !contains(next.selectedSessionId);
 }
 
+export function SortableSidebarOrderItem({
+  id,
+  disabled,
+  dragHandleLabel,
+  children,
+}: {
+  id: string;
+  disabled: boolean;
+  dragHandleLabel: string;
+  children: ReactNode | ((dragHandle: ReactNode) => ReactNode);
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id, disabled });
+  const constrainedTransform = transform
+    ? {
+        ...transform,
+        x: 0,
+        scaleX: 1,
+        scaleY: 1,
+      }
+    : null;
+  const dragHandle = disabled ? null : (
+    <button
+      type="button"
+      ref={setActivatorNodeRef}
+      draggable={false}
+      className={cn(
+        'relative z-20 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm',
+        'text-sidebar-foreground-muted/80 transition-[opacity,background-color,color] duration-100',
+        'opacity-0 pointer-events-none',
+        'group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto',
+        'hover:bg-sidebar-hover hover:text-sidebar-hover-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring/40',
+        'cursor-grab active:cursor-grabbing'
+      )}
+      aria-label={dragHandleLabel}
+      {...attributes}
+      {...listeners}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onDragStart={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+    >
+      <GripVertical className="h-3.5 w-3.5" />
+    </button>
+  );
+  const content =
+    typeof children === 'function' ? (
+      children(dragHandle)
+    ) : (
+      <div className="group flex min-w-0 items-center">
+        <div className="min-w-0 flex-1">{children}</div>
+        {dragHandle}
+      </div>
+    );
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(constrainedTransform),
+        transition,
+      }}
+      className={cn('w-full', isDragging && 'opacity-60')}
+      data-sidebar-sortable-id={id}
+    >
+      {content}
+    </div>
+  );
+}
+
+export function SidebarSortableList({
+  ids,
+  onDragEnd,
+  children,
+}: {
+  ids: readonly string[];
+  onDragEnd: (event: DragEndEvent) => void;
+  children: ReactNode;
+}) {
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
+  return (
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+      <SortableContext items={[...ids]} strategy={verticalListSortingStrategy}>
+        <div className="flex flex-col gap-px">{children}</div>
+      </SortableContext>
+    </DndContext>
+  );
+}
+
 type SessionGroupSectionProps = {
   group: SessionRowGroup;
   selectedSessionId?: string | null;
@@ -514,6 +653,8 @@ type SessionGroupSectionProps = {
   onNavigateToNewSession?: (repoFullName?: string) => void;
   onOpenPullRequest?: (request: SessionListPullRequestOpen) => void;
   onToggleFullList?: (groupKey: string) => void;
+  onMoveSession?: (move: SessionListSessionMove) => void;
+  dragHandleLabel: string;
   /** Opener session ids whose opened Sessions are hidden. */
   collapsedOpenedBySessionIds: Record<string, boolean>;
   onToggleOpenedBySessions?: (openerSessionId: string) => void;
@@ -566,6 +707,8 @@ const SessionGroupSection = memo(function SessionGroupSection({
   onNavigateToNewSession,
   onOpenPullRequest,
   onToggleFullList,
+  onMoveSession,
+  dragHandleLabel,
   collapsedOpenedBySessionIds,
   onToggleOpenedBySessions,
   getSessionHref,
@@ -632,6 +775,33 @@ const SessionGroupSection = memo(function SessionGroupSection({
       showTreeGutter: hasOpenedByTreeNesting(nodes),
     };
   }, [collapsedOpenedBySessionIds, group, whetherShowFullList]);
+  const sortableSessionIds = useMemo(
+    () => visibleNodes.filter((node) => node.depth === 0).map((node) => node.id),
+    [visibleNodes]
+  );
+  const canReorderSessions = typeof onMoveSession === 'function' && sortableSessionIds.length > 1;
+  const handleSessionDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      if (!canReorderSessions) return;
+      const overId = event.over?.id;
+      if (!overId) return;
+      const activeSessionId = String(event.active.id);
+      const overSessionId = String(overId);
+      if (activeSessionId === overSessionId) return;
+      const fromIndex = sortableSessionIds.indexOf(activeSessionId);
+      const toIndex = sortableSessionIds.indexOf(overSessionId);
+      if (fromIndex < 0 || toIndex < 0) return;
+      onMoveSession?.({
+        groupKey: group.key,
+        activeSessionId,
+        overSessionId,
+        fromIndex,
+        toIndex,
+        nextSessionIds: arrayMove(sortableSessionIds, fromIndex, toIndex),
+      });
+    },
+    [canReorderSessions, group.key, onMoveSession, sortableSessionIds]
+  );
   const toggleListLabel = whetherShowFullList
     ? t('sessions.showLess', 'Show less')
     : t('sessions.showAll', 'Show all ({{count}})', { count: group.sessions.length });
@@ -783,7 +953,7 @@ const SessionGroupSection = memo(function SessionGroupSection({
       </div>
 
       {!group.collapsed && (
-        <div className="flex flex-col gap-px">
+        <SidebarSortableList ids={sortableSessionIds} onDragEnd={handleSessionDragEnd}>
           {visibleNodes.map((node) => {
             const session = node.item;
             const openerSessionId = normalizeSessionRowId(session.openedBySessionId);
@@ -1235,7 +1405,7 @@ const SessionGroupSection = memo(function SessionGroupSection({
                 </SwipeActionRow>
               );
 
-            return (
+            const treeRow = (
               <SessionOpenedByTreeRow
                 key={session.sessionId}
                 depth={node.depth}
@@ -1243,6 +1413,17 @@ const SessionGroupSection = memo(function SessionGroupSection({
               >
                 {rowContent}
               </SessionOpenedByTreeRow>
+            );
+            if (node.depth !== 0) return treeRow;
+            return (
+              <SortableSidebarOrderItem
+                key={session.sessionId}
+                id={session.sessionId}
+                disabled={!canReorderSessions}
+                dragHandleLabel={dragHandleLabel}
+              >
+                {treeRow}
+              </SortableSidebarOrderItem>
             );
           })}
           {canToggleFullList && (
@@ -1262,7 +1443,7 @@ const SessionGroupSection = memo(function SessionGroupSection({
               <span>{toggleListLabel}</span>
             </button>
           )}
-        </div>
+        </SidebarSortableList>
       )}
       <RenameSessionDialogView
         target={renameTarget}
@@ -1363,6 +1544,8 @@ export const SessionList = memo(function SessionList({
   onShareSessionWithTeam,
   onNew,
   onMoveRepo,
+  sessionOrderByGroupKey,
+  onMoveSession,
   onOpenPullRequest,
   onNavigateToNewSession,
   getSessionHref,
@@ -1372,6 +1555,7 @@ export const SessionList = memo(function SessionList({
   const archiveTooltipLabel = t('sessions.archive', 'Archive session');
   const archiveActionLabel = t('archive.title', 'Archive');
   const archiveConfirmLabel = t('common.confirm', 'Confirm');
+  const dragHandleLabel = t('sessions.messageQueue.dragToReorder', 'Drag to reorder');
   const contextMenuLabels: ContextMenuLabels = useMemo(
     () => ({
       openPr: t('sessions.contextMenu.openPr', 'Open Pull Request'),
@@ -1395,8 +1579,8 @@ export const SessionList = memo(function SessionList({
   const isMobile = useIsMobile();
   const chatsGroupLabel = t('sessions.chats', 'Chats');
   const groups = useMemo(
-    () => buildGroups(sessions, repos, chatsCollapsed, chatsGroupLabel),
-    [sessions, repos, chatsCollapsed, chatsGroupLabel]
+    () => buildGroups(sessions, repos, chatsCollapsed, chatsGroupLabel, sessionOrderByGroupKey),
+    [sessions, repos, chatsCollapsed, chatsGroupLabel, sessionOrderByGroupKey]
   );
   const [whetherShowFullListByGroup, setWhetherShowFullListByGroup] =
     useAtom(sidebarShowFullListAtom);
@@ -1514,6 +1698,8 @@ export const SessionList = memo(function SessionList({
                     onNavigateToNewSession={onNavigateToNewSession}
                     onOpenPullRequest={onOpenPullRequest}
                     onToggleFullList={handleToggleFullList}
+                    onMoveSession={onMoveSession}
+                    dragHandleLabel={dragHandleLabel}
                     collapsedOpenedBySessionIds={collapsedOpenedBySessionIds}
                     onToggleOpenedBySessions={handleToggleOpenedBySessions}
                     getSessionHref={getSessionHref}
@@ -1547,6 +1733,8 @@ export const SessionList = memo(function SessionList({
                   onNavigateToNewSession={onNavigateToNewSession}
                   onOpenPullRequest={onOpenPullRequest}
                   onToggleFullList={handleToggleFullList}
+                  onMoveSession={onMoveSession}
+                  dragHandleLabel={dragHandleLabel}
                   collapsedOpenedBySessionIds={collapsedOpenedBySessionIds}
                   onToggleOpenedBySessions={handleToggleOpenedBySessions}
                   getSessionHref={getSessionHref}

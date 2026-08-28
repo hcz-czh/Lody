@@ -60,8 +60,14 @@ function makeOpenerGroupRows(): SessionListRow[] {
   ];
 }
 
-function buildRepoGroup(sessions: SessionListRow[]) {
-  const groups = buildGroups(sessions, [{ repoFullName: REPO, collapsed: false }], false);
+function buildRepoGroup(sessions: SessionListRow[], savedOrder?: readonly string[]) {
+  const groups = buildGroups(
+    sessions,
+    [{ repoFullName: REPO, collapsed: false }],
+    false,
+    'Chats',
+    savedOrder ? { [REPO]: savedOrder } : {}
+  );
   const group = groups.find((candidate) => candidate.repoFullName === REPO);
   if (!group) throw new Error('expected a repo group');
   return group;
@@ -78,6 +84,35 @@ describe('session group opened-by tree', () => {
       ['opened-2', 1],
       ['opened-3', 1],
       ['unrelated', 0],
+    ]);
+  });
+
+  it('moves an opener with its opened sessions in a manual root order', () => {
+    const group = buildRepoGroup(makeOpenerGroupRows(), ['unrelated', 'opener']);
+    expect(
+      getVisibleSessionGroupTree(group, true).map((node) => [node.item.sessionId, node.depth])
+    ).toEqual([
+      ['unrelated', 0],
+      ['opener', 0],
+      ['opened-1', 1],
+      ['opened-2', 1],
+      ['opened-3', 1],
+    ]);
+  });
+
+  it('keeps pinned rows above manually ordered unpinned rows', () => {
+    const group = buildRepoGroup(
+      [
+        makeRow({ sessionId: 'newer', latestMessageAt: '2026-04-22T10:00:00.000Z' }),
+        makeRow({ sessionId: 'older', latestMessageAt: '2026-04-22T08:00:00.000Z' }),
+        makeRow({ sessionId: 'pinned', isPinned: true }),
+      ],
+      ['older', 'newer']
+    );
+    expect(group.sessions.map((session) => session.sessionId)).toEqual([
+      'pinned',
+      'older',
+      'newer',
     ]);
   });
 

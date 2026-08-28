@@ -23,16 +23,22 @@ import type {
   LoroSidebarOrganizeMode,
 } from '@/components/loro-sidebar';
 import { LoroSidebar } from '@/components/loro-sidebar';
-import { LocalProjectItem, SortableSidebarOrderItem } from '@/components/loro-app-sidebar';
+import { LocalProjectItem } from '@/components/loro-app-sidebar';
 import { SidebarSectionHeader } from '@/components/sidebar-row-shared';
 import { buildSidebarOpenerRowResolver } from '@/components/sessions/session-list-rows';
-import { SessionList } from '@/components/session-list';
+import { SessionList, SortableSidebarOrderItem } from '@/components/session-list';
 import type { SessionListProps } from '@/components/session-list';
 import type {
   SessionListRepoMove,
   SessionListRepoState,
   SessionListRow,
+  SessionListSessionMove,
 } from '@/components/session-list';
+import {
+  mergeVisibleSidebarOrder,
+  reconcileVisibleSidebarOrder,
+  type SidebarSessionOrder,
+} from '@/atoms/sidebar-state';
 import type {
   SidebarUpdatedBucketKey,
   SidebarUpdatedItem,
@@ -302,6 +308,7 @@ function StoryLayout(args: Parameters<typeof LoroSidebar>[0]) {
   const [chatsCollapsed, setChatsCollapsed] = useState(false);
   const [pinnedSectionCollapsed, setPinnedSectionCollapsed] = useState(false);
   const [sessions, setTasks] = useState<SessionListRow[]>(baseSessionListProps.sessions);
+  const [sessionOrderByGroupKey, setSessionOrderByGroupKey] = useState<SidebarSessionOrder>({});
   const [organizeMode, setOrganizeMode] = useState<LoroSidebarOrganizeMode>(
     args.organizeMode ?? 'workspace'
   );
@@ -350,6 +357,13 @@ function StoryLayout(args: Parameters<typeof LoroSidebar>[0]) {
     setTasks((prev) =>
       prev.map((task) => (task.sessionId === sessionId ? { ...task, isPinned: nextPinned } : task))
     );
+  };
+
+  const moveSession = (move: SessionListSessionMove) => {
+    setSessionOrderByGroupKey((prev) => ({
+      ...prev,
+      [move.groupKey]: mergeVisibleSidebarOrder(prev[move.groupKey] ?? [], move.nextSessionIds),
+    }));
   };
 
   const createTask = (repoFullName?: string) => {
@@ -424,6 +438,8 @@ function StoryLayout(args: Parameters<typeof LoroSidebar>[0]) {
         onTogglePinSession: togglePinned,
         onNew: createTask,
         onMoveRepo: (move: SessionListRepoMove) => setRepos(move.nextRepos),
+        sessionOrderByGroupKey,
+        onMoveSession: moveSession,
       }}
       onWorkspaceSelected={setWorkspaceId}
       onHomeClicked={() => setActiveNav('home')}
@@ -958,6 +974,31 @@ const demoLocalSessions: SessionMeta[] = [
   },
 ];
 
+const demoRemoteSessions: Record<string, SessionMeta[]> = {
+  'machine-remote-mac:proj-conductor': [
+    {
+      id: 'remote-sess-conductor' as SessionId,
+      machineId: 'machine-remote-mac' as MachineId,
+      createdAt: new Date(NOW - 70 * 60 * 1000).toISOString(),
+      userId: 'user-demo',
+      cliType: 'builtin',
+      agentType: 'codex',
+      title: 'Review conductor changes',
+      lastMessageAt: NOW - 70 * 60 * 1000,
+    },
+    {
+      id: 'remote-sess-conductor-tests' as SessionId,
+      machineId: 'machine-remote-mac' as MachineId,
+      createdAt: new Date(NOW - 4 * 60 * 60 * 1000).toISOString(),
+      userId: 'user-demo',
+      cliType: 'builtin',
+      agentType: 'codex',
+      title: 'Update conductor tests',
+      lastMessageAt: NOW - 4 * 60 * 60 * 1000,
+    },
+  ],
+};
+
 /**
  * A child Tab of `local-sess-worktree`. Child Tabs are deliberately absent from
  * every sidebar list, so this one is NOT in `demoLocalSessions` — it exists only
@@ -994,6 +1035,9 @@ function DemoProjectSection({
   onToggleCollapsed,
   onToggleProjectCollapsed,
   onProjectsChange,
+  sessionsByProjectKey,
+  manualSessionOrderByGroupKey,
+  onMoveSession,
 }: {
   machineId: MachineId;
   machineName: string;
@@ -1006,6 +1050,9 @@ function DemoProjectSection({
   onToggleCollapsed: () => void;
   onToggleProjectCollapsed: (projectKey: string) => void;
   onProjectsChange: (projects: LocalProjectMeta[]) => void;
+  sessionsByProjectKey: Record<string, SessionMeta[]>;
+  manualSessionOrderByGroupKey: SidebarSessionOrder;
+  onMoveSession: (move: SessionListSessionMove) => void;
 }) {
   const isMobile = useIsMobile();
   const sensors = useSensors(
@@ -1066,11 +1113,8 @@ function DemoProjectSection({
                         canNavigateProject
                         collapsed={collapsedProjects[projectKey] ?? false}
                         isSelected={false}
-                        sessionsForProject={
-                          isLocal && project.id === ('proj-lody' as LocalProjectId)
-                            ? demoLocalSessions
-                            : []
-                        }
+                        sessionsForProject={sessionsByProjectKey[projectKey] ?? []}
+                        manualSessionOrder={manualSessionOrderByGroupKey[projectKey] !== undefined}
                         childSessionsByParent={new Map()}
                         liveSessionStatuses={EMPTY_LIVE_SESSION_STATUSES}
                         formattedPath={project.rootPath}
@@ -1083,6 +1127,7 @@ function DemoProjectSection({
                         isMobile={isMobile}
                         toggleLabel="Toggle"
                         dragHandle={dragHandle}
+                        onMoveSession={onMoveSession}
                         onNavigateProject={() => {}}
                         onNavigateSession={() => {}}
                         onArchive={() => {}}
@@ -1113,6 +1158,9 @@ function ProductionLikeTopContent({
   onNew,
   chatsCollapsed,
   onToggleChatsCollapsed,
+  sessionOrderByGroupKey,
+  onMoveSession,
+  onTogglePinSession,
   filterPlaceholder,
 }: {
   chatSessions: SessionListRow[];
@@ -1123,12 +1171,21 @@ function ProductionLikeTopContent({
   onNew: (repoFullName?: string) => void;
   chatsCollapsed: boolean;
   onToggleChatsCollapsed: () => void;
+  sessionOrderByGroupKey: SidebarSessionOrder;
+  onMoveSession: (move: SessionListSessionMove) => void;
+  onTogglePinSession: (sessionId: string, nextPinned: boolean) => void;
   filterPlaceholder?: ReactNode;
 }) {
   const isMobile = useIsMobile();
   const [githubCollapsed, setGithubCollapsed] = useState(false);
   const [localProjects, setLocalProjects] = useState(demoProjects);
   const [remoteProjectSections, setRemoteProjectSections] = useState(demoRemoteProjectSections);
+  const [projectSessionsByKey, setProjectSessionsByKey] = useState<Record<string, SessionMeta[]>>(
+    () => ({
+      [`${demoMachineId}:proj-lody`]: demoLocalSessions,
+      ...demoRemoteSessions,
+    })
+  );
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const projectCollapseStates = useMemo(
     () =>
@@ -1138,7 +1195,14 @@ function ProductionLikeTopContent({
           ...demoRemoteProjectSections.flatMap((section) =>
             section.projects.map((project) => [section.machineId, project] as const)
           ),
-        ].map(([machineId, project]) => [`${machineId}:${project.id}`, true])
+        ].map(([machineId, project]) => [
+          `${machineId}:${project.id}`,
+          !(
+            (machineId === demoMachineId && project.id === ('proj-lody' as LocalProjectId)) ||
+            (machineId === ('machine-remote-mac' as MachineId) &&
+              project.id === ('proj-conductor' as LocalProjectId))
+          ),
+        ])
       ),
     []
   );
@@ -1161,6 +1225,23 @@ function ProductionLikeTopContent({
     setCollapsedProjects((prev) => ({ ...prev, [projectKey]: !(prev[projectKey] ?? false) }));
   const toggleSectionCollapsed = (sectionKey: string) =>
     setCollapsedSections((prev) => ({ ...prev, [sectionKey]: !(prev[sectionKey] ?? false) }));
+  const moveProjectSession = (move: SessionListSessionMove) => {
+    onMoveSession(move);
+    setProjectSessionsByKey((prev) => {
+      const current = prev[move.groupKey] ?? [];
+      const byId = new Map(current.map((session) => [session.id, session]));
+      return {
+        ...prev,
+        [move.groupKey]: reconcileVisibleSidebarOrder(
+          move.nextSessionIds,
+          current.map((session) => session.id)
+        ).flatMap((id) => {
+          const session = byId.get(id as SessionId);
+          return session ? [session] : [];
+        }),
+      };
+    });
+  };
 
   return (
     // Mirrors LoroAppSidebar's sidebarTopContent: sections carry their own
@@ -1176,8 +1257,11 @@ function ProductionLikeTopContent({
           onSelectSession={onSelectSession}
           onArchiveSession={onArchiveSession}
           onNew={onNew}
+          onTogglePinSession={onTogglePinSession}
           headerAction={filterPlaceholder}
           onToggleChatsCollapsed={onToggleChatsCollapsed}
+          sessionOrderByGroupKey={sessionOrderByGroupKey}
+          onMoveSession={onMoveSession}
         />
       ) : null}
 
@@ -1192,6 +1276,9 @@ function ProductionLikeTopContent({
         onToggleCollapsed={() => toggleSectionCollapsed(demoMachineId)}
         onToggleProjectCollapsed={toggleProjectCollapsed}
         onProjectsChange={setLocalProjects}
+        sessionsByProjectKey={projectSessionsByKey}
+        manualSessionOrderByGroupKey={sessionOrderByGroupKey}
+        onMoveSession={moveProjectSession}
       />
 
       <DndContext
@@ -1225,6 +1312,9 @@ function ProductionLikeTopContent({
                       )
                     )
                   }
+                  sessionsByProjectKey={projectSessionsByKey}
+                  manualSessionOrderByGroupKey={sessionOrderByGroupKey}
+                  onMoveSession={moveProjectSession}
                 />
               )}
             </SortableSidebarOrderItem>
@@ -1252,12 +1342,28 @@ function WithProjectsLayout(args: Parameters<typeof LoroSidebar>[0]) {
     baseSessionListProps.selectedSessionId ?? null
   );
   const [chatsCollapsed, setChatsCollapsed] = useState(false);
+  const [pinnedSectionCollapsed, setPinnedSectionCollapsed] = useState(false);
   const [sessions, setTasks] = useState<SessionListRow[]>(baseSessionListProps.sessions);
   const [repos, setRepos] = useState<SessionListRepoState[]>(baseSessionListProps.repos);
+  const [sessionOrderByGroupKey, setSessionOrderByGroupKey] = useState<SidebarSessionOrder>({});
   const nextSessionIdRef = useRef(1);
 
-  const chatSessions = useMemo(() => sessions.filter((t) => !t.repoFullName), [sessions]);
-  const repoSessions = useMemo(() => sessions.filter((t) => Boolean(t.repoFullName)), [sessions]);
+  const workspaceSessions = useMemo(
+    () => sessions.filter((session) => !session.isPinned),
+    [sessions]
+  );
+  const chatSessions = useMemo(
+    () => workspaceSessions.filter((session) => !session.repoFullName),
+    [workspaceSessions]
+  );
+  const repoSessions = useMemo(
+    () => workspaceSessions.filter((session) => Boolean(session.repoFullName)),
+    [workspaceSessions]
+  );
+  const pinnedItems = useMemo(
+    () => buildDemoUpdatedItems(sessions, 'team').filter((item) => item.isPinned),
+    [sessions]
+  );
 
   const archiveTask = (sessionId: string) => {
     setTasks((prev) => prev.filter((task) => task.sessionId !== sessionId));
@@ -1288,6 +1394,21 @@ function WithProjectsLayout(args: Parameters<typeof LoroSidebar>[0]) {
     setSelectedSessionId(sessionId);
   };
 
+  const togglePinned = (sessionId: string, nextPinned: boolean) => {
+    setTasks((prev) =>
+      prev.map((session) =>
+        session.sessionId === sessionId ? { ...session, isPinned: nextPinned } : session
+      )
+    );
+  };
+
+  const moveSession = (move: SessionListSessionMove) => {
+    setSessionOrderByGroupKey((prev) => ({
+      ...prev,
+      [move.groupKey]: mergeVisibleSidebarOrder(prev[move.groupKey] ?? [], move.nextSessionIds),
+    }));
+  };
+
   const toggleRepoCollapsed = (repoFullName: string) => {
     setRepos((prev) =>
       prev.map((repo) =>
@@ -1303,6 +1424,10 @@ function WithProjectsLayout(args: Parameters<typeof LoroSidebar>[0]) {
       {...args}
       activeNav={activeNav}
       currentWorkspaceId={workspaceId}
+      pinnedItems={pinnedItems}
+      pinnedSectionCollapsed={pinnedSectionCollapsed}
+      onTogglePinnedSection={() => setPinnedSectionCollapsed((prev) => !prev)}
+      onToggleUpdatedItemPinned={togglePinned}
       topContent={
         <ProductionLikeTopContent
           chatSessions={chatSessions}
@@ -1313,6 +1438,9 @@ function WithProjectsLayout(args: Parameters<typeof LoroSidebar>[0]) {
           onNew={createTask}
           chatsCollapsed={chatsCollapsed}
           onToggleChatsCollapsed={() => setChatsCollapsed((p) => !p)}
+          sessionOrderByGroupKey={sessionOrderByGroupKey}
+          onMoveSession={moveSession}
+          onTogglePinSession={togglePinned}
           // LoroSidebar keeps the global filter trigger over the first visible
           // section. Reserve its width here because this story intentionally
           // places Chats before the project sections.
@@ -1326,8 +1454,11 @@ function WithProjectsLayout(args: Parameters<typeof LoroSidebar>[0]) {
         onSelectSession: setSelectedSessionId,
         onToggleRepoCollapsed: toggleRepoCollapsed,
         onArchiveSession: archiveTask,
+        onTogglePinSession: togglePinned,
         onNew: createTask,
         onMoveRepo: (move: SessionListRepoMove) => setRepos(move.nextRepos),
+        sessionOrderByGroupKey,
+        onMoveSession: moveSession,
       }}
       onWorkspaceSelected={setWorkspaceId}
       onHomeClicked={() => setActiveNav('home')}

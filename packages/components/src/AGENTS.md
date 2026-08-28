@@ -15,7 +15,10 @@ Parent `AGENTS.md` files also apply.
 
 ## Sidebar ordering
 
-- Repository, per-machine project, and remote-machine order are per-workspace
-  client preferences, never shared workspace data. Keep the local-machine
-  section first and never move a project across machines. Sort listeners belong
-  only on the right-side handle so Session mention drags remain independent.
+- Repository, per-machine project, remote-machine, and per-group Session order
+  are per-workspace client preferences, never shared workspace data. Keep the
+  local-machine section first and never move a project or Session across its
+  owning machine/project/repository group. Pinned Sessions stay in their own
+  section; only top-level Sessions are sortable, with opened Sessions following
+  their opener. Sort listeners belong only on the right-side handle and constrain
+  movement vertically so whole-row Session mention drags remain independent.

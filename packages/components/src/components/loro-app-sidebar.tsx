@@ -12,10 +12,8 @@ import {
   arrayMove,
   sortableKeyboardCoordinates,
   SortableContext,
-  useSortable,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
 import { startSessionMentionDrag } from '@/lib/session-mention-drag';
 import { useSidebarKeyboardNav } from '@/hooks/use-sidebar-keyboard-nav';
 import { SidebarKeyboardHighlight } from '@/components/sidebar-keyboard-highlight';
@@ -88,6 +86,7 @@ import {
   reconcileVisibleSidebarOrder,
   repoCollapseStateAtom,
   repoOrderAtom,
+  sidebarSessionOrderAtom,
   sidebarCollapsedAtom,
   sidebarLastWidthAtom,
   sidebarOrganizeModeAtom,
@@ -135,10 +134,13 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/ui/tooltip';
 import { SwipeActionRow } from '@/components/shared/swipe-action-row';
 import {
   SessionList,
+  SidebarSortableList,
   shallowEqualExceptKeys,
+  SortableSidebarOrderItem,
   type SessionListPullRequestOpen,
   type SessionListRepoMove,
   type SessionListRepoState,
+  type SessionListSessionMove,
 } from '@/components/session-list';
 import {
   buildChildSessionsByParent,
@@ -161,7 +163,6 @@ import {
   Clock3,
   Folder,
   FolderPlus,
-  GripVertical,
   Link2,
   LockKeyhole,
   Loader2,
@@ -602,6 +603,7 @@ type LocalProjectSessionItemProps = {
   openerRootSessionId?: string | null;
   openedByTree?: SessionRowOpenedByTreeSlot;
   sharing?: SessionSharingState;
+  dragHandle?: ReactNode;
   archiveTooltipLabel: string;
   archiveActionLabel: string;
   archiveConfirmLabel: string;
@@ -629,6 +631,7 @@ const LocalProjectSessionItem = memo(function LocalProjectSessionItem({
   openerRootSessionId,
   openedByTree,
   sharing,
+  dragHandle,
   archiveTooltipLabel,
   archiveActionLabel,
   archiveConfirmLabel,
@@ -781,6 +784,7 @@ const LocalProjectSessionItem = memo(function LocalProjectSessionItem({
             ) : undefined
           }
         />
+        {dragHandle}
       </div>
     </div>
   );
@@ -939,6 +943,7 @@ export type LocalProjectItemProps = {
   collapsed: boolean;
   isSelected: boolean;
   sessionsForProject: SessionMeta[];
+  manualSessionOrder?: boolean;
   /**
    * Map of parent session id -> non-archived child sessions. Used to roll up
    * sub-session activity time into the parent row's displayed timestamp.
@@ -959,6 +964,7 @@ export type LocalProjectItemProps = {
   isMobile: boolean;
   toggleLabel: string;
   dragHandle?: ReactNode;
+  onMoveSession?: (move: SessionListSessionMove) => void;
   onNavigateProject: (machineId: MachineId, localProjectId: string) => void;
   onNavigateSession: (sessionId: string, tabSessionId?: string) => void;
   onArchive: (sessionId: string) => void;
@@ -998,73 +1004,6 @@ function localProjectItemPropsEqual(prev: LocalProjectItemProps, next: LocalProj
   return !contains(prev.selectedSessionId) && !contains(next.selectedSessionId);
 }
 
-export function SortableSidebarOrderItem({
-  id,
-  disabled,
-  dragHandleLabel,
-  children,
-}: {
-  id: string;
-  disabled: boolean;
-  dragHandleLabel: string;
-  children: (dragHandle: ReactNode) => ReactNode;
-}) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    setActivatorNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id, disabled });
-  const constrainedTransform = transform
-    ? {
-        ...transform,
-        x: 0,
-        scaleX: 1,
-        scaleY: 1,
-      }
-    : null;
-  const dragHandle = disabled ? null : (
-    <button
-      type="button"
-      ref={setActivatorNodeRef}
-      className={cn(
-        'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm',
-        'text-sidebar-foreground-muted/80 transition-[opacity,background-color,color] duration-100',
-        'opacity-0 pointer-events-none',
-        'group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto',
-        'hover:bg-sidebar-hover hover:text-sidebar-hover-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring/40',
-        'cursor-grab active:cursor-grabbing'
-      )}
-      aria-label={dragHandleLabel}
-      {...attributes}
-      {...listeners}
-      onClick={(event) => {
-        event.preventDefault();
-        event.stopPropagation();
-      }}
-    >
-      <GripVertical className="h-3.5 w-3.5" />
-    </button>
-  );
-
-  return (
-    <div
-      ref={setNodeRef}
-      style={{
-        transform: CSS.Transform.toString(constrainedTransform),
-        transition,
-      }}
-      className={cn('w-full', isDragging && 'opacity-60')}
-      data-sidebar-sortable-id={id}
-    >
-      {children(dragHandle)}
-    </div>
-  );
-}
-
 export const LocalProjectItem = memo(function LocalProjectItem({
   machineId,
   machineName,
@@ -1075,6 +1014,7 @@ export const LocalProjectItem = memo(function LocalProjectItem({
   collapsed,
   isSelected,
   sessionsForProject,
+  manualSessionOrder = false,
   childSessionsByParent,
   liveSessionStatuses,
   resolveSessionAuthor,
@@ -1088,6 +1028,7 @@ export const LocalProjectItem = memo(function LocalProjectItem({
   isMobile,
   toggleLabel,
   dragHandle,
+  onMoveSession,
   onNavigateProject,
   onNavigateSession,
   onArchive,
@@ -1117,13 +1058,52 @@ export const LocalProjectItem = memo(function LocalProjectItem({
         getOpenedBySessionId: (session) =>
           session.openedByRootSessionId ?? resolveOpenerRowId(session.openedBySessionId),
         isCollapsed: (openerId) => collapsedOpenedBySessionIds[openerId] === true,
-        // Same contract as the other lists: this section is sorted by latest
-        // activity, so an opener is ranked by its freshest opened Session.
-        rootRank: (session) => getEffectiveLatestMessageAt(session, childSessionsByParent),
+        // Before a user chooses an order, an opener follows its freshest child.
+        // Once manually ordered, incoming root order is authoritative.
+        ...(manualSessionOrder
+          ? {}
+          : {
+              rootRank: (session: SessionMeta) =>
+                getEffectiveLatestMessageAt(session, childSessionsByParent),
+            }),
       }),
-    [childSessionsByParent, collapsedOpenedBySessionIds, resolveOpenerRowId, sessionsForProject]
+    [
+      childSessionsByParent,
+      collapsedOpenedBySessionIds,
+      manualSessionOrder,
+      resolveOpenerRowId,
+      sessionsForProject,
+    ]
   );
   const showTreeGutter = hasOpenedByTreeNesting(sessionNodes);
+  const sortableSessionIds = useMemo(
+    () => sessionNodes.filter((node) => node.depth === 0).map((node) => node.id),
+    [sessionNodes]
+  );
+  const canReorderSessions = typeof onMoveSession === 'function' && sortableSessionIds.length > 1;
+  const groupKey = `${machineId}:${project.id}`;
+  const handleSessionDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      if (!canReorderSessions) return;
+      const overId = event.over?.id;
+      if (!overId) return;
+      const activeSessionId = String(event.active.id);
+      const overSessionId = String(overId);
+      if (activeSessionId === overSessionId) return;
+      const fromIndex = sortableSessionIds.indexOf(activeSessionId);
+      const toIndex = sortableSessionIds.indexOf(overSessionId);
+      if (fromIndex < 0 || toIndex < 0) return;
+      onMoveSession?.({
+        groupKey,
+        activeSessionId,
+        overSessionId,
+        fromIndex,
+        toIndex,
+        nextSessionIds: arrayMove(sortableSessionIds, fromIndex, toIndex),
+      });
+    },
+    [canReorderSessions, groupKey, onMoveSession, sortableSessionIds]
+  );
   const trimmedMachineName =
     typeof machineName === 'string' && machineName.trim() ? machineName.trim() : null;
   const baseAriaLabel = formattedPath
@@ -1273,7 +1253,7 @@ export const LocalProjectItem = memo(function LocalProjectItem({
       </div>
 
       {!collapsed ? (
-        <div className="flex flex-col gap-px">
+        <SidebarSortableList ids={sortableSessionIds} onDragEnd={handleSessionDragEnd}>
           {sessionNodes.map((node) => {
             const session = node.item;
             const activity = getEffectiveSessionActivitySummary(
@@ -1284,7 +1264,7 @@ export const LocalProjectItem = memo(function LocalProjectItem({
             const openedByTree = buildSessionRowOpenedByTreeSlot(node, t, () =>
               onToggleOpenedBySessions(session.id)
             );
-            return (
+            const treeRow = (sessionDragHandle: ReactNode = null) => (
               <SessionOpenedByTreeRow key={session.id} depth={node.depth} gutter={showTreeGutter}>
                 <LocalProjectSessionItem
                   session={session}
@@ -1310,6 +1290,7 @@ export const LocalProjectItem = memo(function LocalProjectItem({
                   }
                   openedByTree={openedByTree}
                   sharing={sessionSharingById.get(session.id)}
+                  dragHandle={sessionDragHandle}
                   archiveTooltipLabel={archiveTooltipLabel}
                   archiveActionLabel={archiveActionLabel}
                   archiveConfirmLabel={archiveConfirmLabel}
@@ -1317,8 +1298,19 @@ export const LocalProjectItem = memo(function LocalProjectItem({
                 />
               </SessionOpenedByTreeRow>
             );
+            if (node.depth !== 0) return treeRow();
+            return (
+              <SortableSidebarOrderItem
+                key={session.id}
+                id={session.id}
+                disabled={!canReorderSessions}
+                dragHandleLabel={t('sessions.messageQueue.dragToReorder', 'Drag to reorder')}
+              >
+                {treeRow}
+              </SortableSidebarOrderItem>
+            );
           })}
-        </div>
+        </SidebarSortableList>
       ) : null}
     </div>
   );
@@ -1745,6 +1737,22 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
   );
   const localProjectSidebarOrderRef = useRef(localProjectSidebarOrder);
   localProjectSidebarOrderRef.current = localProjectSidebarOrder;
+  const [sidebarSessionOrder, setSidebarSessionOrder] = useAtom(sidebarSessionOrderAtom);
+  const sidebarSessionOrderRef = useRef(sidebarSessionOrder);
+  sidebarSessionOrderRef.current = sidebarSessionOrder;
+  const handleMoveSession = useCallback(
+    (move: SessionListSessionMove) => {
+      const current = sidebarSessionOrderRef.current;
+      setSidebarSessionOrder({
+        ...current,
+        [move.groupKey]: mergeVisibleSidebarOrder(
+          current[move.groupKey] ?? [],
+          move.nextSessionIds
+        ),
+      });
+    },
+    [setSidebarSessionOrder]
+  );
   const [localProjectCollapseState, setLocalProjectCollapseState] = useAtom(
     localProjectCollapseStateAtom
   );
@@ -1889,13 +1897,21 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
   const workspaceLocalProjectSessionsByKey = useMemo(() => {
     const map = new Map<string, SessionMeta[]>();
     for (const [projectKey, sessionsForProject] of localProjectSessionsByKey) {
+      const visibleSessions = sessionsForProject.filter((session) => !session.isPinned);
+      const visibleSessionById = new Map(visibleSessions.map((session) => [session.id, session]));
       map.set(
         projectKey,
-        sessionsForProject.filter((session) => !session.isPinned)
+        reconcileVisibleSidebarOrder(
+          sidebarSessionOrder[projectKey] ?? [],
+          visibleSessions.map((session) => session.id)
+        ).flatMap((sessionId) => {
+          const session = visibleSessionById.get(sessionId as SessionId);
+          return session ? [session] : [];
+        })
       );
     }
     return map;
-  }, [localProjectSessionsByKey]);
+  }, [localProjectSessionsByKey, sidebarSessionOrder]);
 
   // The ONE session-navigation callback for every sidebar surface (rows,
   // Updated items, keyboard nav). `tabSessionId` restores the precise child Tab
@@ -2432,6 +2448,9 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
                                       collapsed={collapsed}
                                       isSelected={isSelected}
                                       sessionsForProject={sessionsForProject}
+                                      manualSessionOrder={
+                                        sidebarSessionOrder[projectKey] !== undefined
+                                      }
                                       childSessionsByParent={childSessionsByParent}
                                       liveSessionStatuses={liveSessionStatuses}
                                       resolveSessionAuthor={resolveSessionAuthor}
@@ -2445,6 +2464,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
                                       isMobile={isMobile}
                                       toggleLabel={toggleLabel}
                                       dragHandle={projectDragHandle}
+                                      onMoveSession={handleMoveSession}
                                       onNavigateProject={handleNavigateToProject}
                                       onNavigateSession={handleNavigateToSession}
                                       onArchive={handleArchiveSession}
@@ -2851,6 +2871,8 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
       onCopySessionUrl={handleCopySessionUrl}
       onShareSessionWithTeam={handleRequestShareSession}
       onToggleChatsCollapsed={handleToggleChatsCollapsed}
+      sessionOrderByGroupKey={sidebarSessionOrder}
+      onMoveSession={handleMoveSession}
       getSessionHref={getSessionHref}
     />
   ) : null;
@@ -2895,6 +2917,8 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
       onShareSessionWithTeam: handleRequestShareSession,
       onToggleRepoCollapsed: handleToggleRepoCollapsed,
       onMoveRepo: handleMoveRepo,
+      sessionOrderByGroupKey: sidebarSessionOrder,
+      onMoveSession: handleMoveSession,
       onOpenPullRequest: handleOpenTaskPullRequest,
       onNavigateToNewSession: handleNavigateToNewSession,
       getSessionHref,
@@ -2909,6 +2933,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
       handleRequestShareSession,
       handleTogglePinSession,
       handleMoveRepo,
+      handleMoveSession,
       handleNavigateToNewSession,
       handleOpenTaskPullRequest,
       handleNavigateToSession,
@@ -2917,6 +2942,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
       repos,
       selectedSessionId,
       sessionsListLoading,
+      sidebarSessionOrder,
     ]
   );
 
@@ -2981,6 +3007,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
           machineId,
           localProjectId: project.id,
           collapsed,
+          manualSessionOrder: sidebarSessionOrder[projectKey] !== undefined,
           // Mirror exactly what LocalProjectItem renders: same nesting target and
           // the same group ranking, or arrow keys drift from the visible order.
           sessions: sessionsForProject.map((s) => ({
@@ -3004,6 +3031,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
     localProjectsSectionCollapseState,
     resolveOpenerRowId,
     workspaceLocalProjectSessionsByKey,
+    sidebarSessionOrder,
   ]);
 
   const selectedSessionIdRef = useRef(selectedSessionId);
@@ -3082,6 +3110,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
           repos,
           chatSessions: workspaceChatSessions,
           chatsCollapsed,
+          sessionOrderByGroupKey: sidebarSessionOrder,
         },
         updated: {
           items: updatedItems,
@@ -3098,6 +3127,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
       pinnedItems,
       pinnedSectionCollapsed,
       repos,
+      sidebarSessionOrder,
       showFullSessionGroups,
       updatedBucketCollapseState.all,
       updatedBucketShowFullState.all,

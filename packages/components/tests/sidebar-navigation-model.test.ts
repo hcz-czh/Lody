@@ -108,6 +108,55 @@ describe('sidebar navigation model', () => {
     });
   });
 
+  it('uses manual session order for local, repository, and chat keyboard navigation', () => {
+    const items = buildSidebarNavigationItems({
+      ...baseOptions,
+      workspace: {
+        localSections: [
+          {
+            collapsed: false,
+            projects: [
+              {
+                machineId: 'machine',
+                localProjectId: 'project',
+                collapsed: false,
+                manualSessionOrder: true,
+                sessions: [
+                  { id: 'local-old', rootRankMs: 1 },
+                  { id: 'local-new', rootRankMs: 2 },
+                ],
+              },
+            ],
+          },
+        ],
+        githubSectionCollapsed: false,
+        repoSessions: [
+          sessionRow('repo-new', '2026-07-16T11:00:00Z', 'repo'),
+          sessionRow('repo-old', '2026-07-16T08:00:00Z', 'repo'),
+        ],
+        repos: [{ repoFullName: 'repo', collapsed: false }],
+        chatSessions: [
+          sessionRow('chat-new', '2026-07-16T10:00:00Z'),
+          sessionRow('chat-old', '2026-07-16T07:00:00Z'),
+        ],
+        chatsCollapsed: false,
+        sessionOrderByGroupKey: {
+          repo: ['repo-old', 'repo-new'],
+          [ONLY_CHATS_KEY]: ['chat-old', 'chat-new'],
+        },
+      },
+    });
+
+    expect(sessionIds(items)).toEqual([
+      'local-old',
+      'local-new',
+      'repo-old',
+      'repo-new',
+      'chat-old',
+      'chat-new',
+    ]);
+  });
+
   it('uses the Updated projection instead of stale Workspace grouping', () => {
     const items = buildSidebarNavigationItems({
       ...baseOptions,

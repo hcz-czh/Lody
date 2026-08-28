@@ -20,6 +20,7 @@ type SidebarNavigationLocalProject = {
   machineId: string;
   localProjectId: string;
   collapsed: boolean;
+  manualSessionOrder?: boolean;
   sessions: Array<{
     id: string;
     /** Sidebar row to nest under; resolved by the sidebar (child Tab → root). */
@@ -51,6 +52,7 @@ export type SidebarNavigationModelOptions = {
     repos: SessionListRepoState[];
     chatSessions: SessionListRow[];
     chatsCollapsed: boolean;
+    sessionOrderByGroupKey?: Readonly<Record<string, readonly string[]>>;
   };
   updated: {
     items: SidebarUpdatedItem[];
@@ -100,7 +102,9 @@ function emitLocalSections(
         getId: (session) => session.id,
         getOpenedBySessionId: (session) => session.openedByRowSessionId ?? null,
         isCollapsed: (openerId) => collapsedOpenedBySessions[openerId] === true,
-        rootRank: (session) => session.rootRankMs ?? 0,
+        ...(project.manualSessionOrder
+          ? {}
+          : { rootRank: (session: (typeof project.sessions)[number]) => session.rootRankMs ?? 0 }),
       });
       for (const node of nodes) {
         items.push({ kind: 'session', sessionId: node.item.id, groupKey: projectKey });
@@ -150,12 +154,24 @@ export function buildSidebarNavigationItems({
   emitLocalSections(items, workspace.localSections, collapsedOpenedBySessions);
 
   if (!workspace.githubSectionCollapsed) {
-    for (const group of buildGroups(workspace.repoSessions, workspace.repos, false)) {
+    for (const group of buildGroups(
+      workspace.repoSessions,
+      workspace.repos,
+      false,
+      'Chats',
+      workspace.sessionOrderByGroupKey
+    )) {
       emitSessionGroup(items, group, showFullSessionGroups, collapsedOpenedBySessions);
     }
   }
 
-  for (const group of buildGroups(workspace.chatSessions, [], workspace.chatsCollapsed)) {
+  for (const group of buildGroups(
+    workspace.chatSessions,
+    [],
+    workspace.chatsCollapsed,
+    'Chats',
+    workspace.sessionOrderByGroupKey
+  )) {
     emitSessionGroup(items, group, showFullSessionGroups, collapsedOpenedBySessions);
   }
 

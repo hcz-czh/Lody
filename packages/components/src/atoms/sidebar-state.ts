@@ -168,6 +168,34 @@ export const localProjectSidebarOrderAtom = atom<
   }
 );
 
+export type SidebarSessionOrder = Readonly<Record<string, readonly string[]>>;
+
+const EMPTY_SIDEBAR_SESSION_ORDER: SidebarSessionOrder = Object.freeze({});
+
+const sidebarSessionOrderByWorkspaceAtom = atomWithStorage<
+  Record<string, Record<string, string[]>>
+>('lody-sidebar-session-order-by-workspace', {});
+
+/** Session order per sidebar group, stored only on this client and workspace. */
+export const sidebarSessionOrderAtom = atom<SidebarSessionOrder, [SidebarSessionOrder], void>(
+  (get) => {
+    const workspaceId = get(currentWorkspaceIdAtom);
+    if (!workspaceId) return EMPTY_SIDEBAR_SESSION_ORDER;
+    return get(sidebarSessionOrderByWorkspaceAtom)[workspaceId] ?? EMPTY_SIDEBAR_SESSION_ORDER;
+  },
+  (get, set, value) => {
+    const workspaceId = get(currentWorkspaceIdAtom);
+    if (!workspaceId) return;
+    const map = get(sidebarSessionOrderByWorkspaceAtom);
+    set(sidebarSessionOrderByWorkspaceAtom, {
+      ...map,
+      [workspaceId]: Object.fromEntries(
+        Object.entries(value).map(([groupKey, sessionIds]) => [groupKey, [...sessionIds]])
+      ),
+    });
+  }
+);
+
 /** Apply saved positions to visible ids, then append newly discovered ids. */
 export function reconcileVisibleSidebarOrder(
   savedIds: readonly string[],
