@@ -1113,6 +1113,7 @@ function ProductionLikeTopContent({
   onNew,
   chatsCollapsed,
   onToggleChatsCollapsed,
+  filterPlaceholder,
 }: {
   chatSessions: SessionListRow[];
   githubWorktreeCount: number;
@@ -1122,6 +1123,7 @@ function ProductionLikeTopContent({
   onNew: (repoFullName?: string) => void;
   chatsCollapsed: boolean;
   onToggleChatsCollapsed: () => void;
+  filterPlaceholder?: ReactNode;
 }) {
   const isMobile = useIsMobile();
   const [githubCollapsed, setGithubCollapsed] = useState(false);
@@ -1174,6 +1176,7 @@ function ProductionLikeTopContent({
           onSelectSession={onSelectSession}
           onArchiveSession={onArchiveSession}
           onNew={onNew}
+          headerAction={filterPlaceholder}
           onToggleChatsCollapsed={onToggleChatsCollapsed}
         />
       ) : null}
@@ -1310,6 +1313,10 @@ function WithProjectsLayout(args: Parameters<typeof LoroSidebar>[0]) {
           onNew={createTask}
           chatsCollapsed={chatsCollapsed}
           onToggleChatsCollapsed={() => setChatsCollapsed((p) => !p)}
+          // LoroSidebar keeps the global filter trigger over the first visible
+          // section. Reserve its width here because this story intentionally
+          // places Chats before the project sections.
+          filterPlaceholder={<span aria-hidden="true" className="block h-6 w-6" />}
         />
       }
       sessionListProps={{
