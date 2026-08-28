@@ -28,7 +28,7 @@ import { LocalProjectItem } from '@/components/loro-app-sidebar';
 import { SidebarSectionHeader } from '@/components/sidebar-row-shared';
 import { buildSidebarOpenerRowResolver } from '@/components/sessions/session-list-rows';
 import {
-  restrictSidebarProjectDrag,
+  restrictSidebarListDrag,
   SessionList,
   SortableSidebarOrderItem,
 } from '@/components/session-list';
@@ -1114,7 +1114,7 @@ function DemoProjectSection({
         <DndContext
           sensors={sensors}
           collisionDetection={closestCenter}
-          modifiers={[restrictSidebarProjectDrag]}
+          modifiers={[restrictSidebarListDrag]}
           onDragStart={handleDragStart}
           onDragCancel={onFinishProjectDrag}
           onDragEnd={handleDragEnd}

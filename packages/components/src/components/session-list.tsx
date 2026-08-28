@@ -616,7 +616,7 @@ export function SortableSidebarOrderItem({
   );
 }
 
-export const restrictSidebarProjectDrag: Modifier = ({
+export const restrictSidebarListDrag: Modifier = ({
   transform,
   activeNodeRect,
   containerNodeRect,
@@ -651,7 +651,12 @@ export function SidebarSortableList({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
   return (
-    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCenter}
+      modifiers={[restrictSidebarListDrag]}
+      onDragEnd={onDragEnd}
+    >
       <SortableContext items={[...ids]} strategy={verticalListSortingStrategy}>
         <div className="flex flex-col gap-px">{children}</div>
       </SortableContext>

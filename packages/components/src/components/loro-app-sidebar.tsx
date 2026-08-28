@@ -138,7 +138,7 @@ import {
   SidebarSortableList,
   shallowEqualExceptKeys,
   SortableSidebarOrderItem,
-  restrictSidebarProjectDrag,
+  restrictSidebarListDrag,
   type SessionListPullRequestOpen,
   type SessionListRepoMove,
   type SessionListRepoState,
@@ -2452,7 +2452,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
                       <DndContext
                         sensors={sidebarOrderSensors}
                         collisionDetection={closestCenter}
-                        modifiers={[restrictSidebarProjectDrag]}
+                        modifiers={[restrictSidebarListDrag]}
                         onDragStart={(event) =>
                           handleProjectDragStart(section.machineId!, projectIds, event)
                         }
