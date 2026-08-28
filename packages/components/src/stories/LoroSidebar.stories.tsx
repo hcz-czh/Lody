@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react';
 import {
-  closestCenter,
   DndContext,
   KeyboardSensor,
   PointerSensor,
@@ -16,6 +15,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useAtomValue, useSetAtom } from 'jotai';
 import { FolderPlus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type {
@@ -29,6 +29,7 @@ import { SidebarSectionHeader } from '@/components/sidebar-row-shared';
 import { buildSidebarOpenerRowResolver } from '@/components/sessions/session-list-rows';
 import {
   restrictSidebarListDrag,
+  sidebarListCollisionDetection,
   SessionList,
   SortableSidebarOrderItem,
 } from '@/components/session-list';
@@ -44,6 +45,10 @@ import {
   reconcileVisibleSidebarOrder,
   type SidebarSessionOrder,
 } from '@/atoms/sidebar-state';
+import {
+  sidebarCollapsedOpenedBySessionsAtom,
+  toggleSidebarCollapsedOpenedBySessionAtom,
+} from '@/atoms/focus-layer';
 import type {
   SidebarUpdatedBucketKey,
   SidebarUpdatedItem,
@@ -352,6 +357,11 @@ function StoryLayout(args: Parameters<typeof LoroSidebar>[0]) {
       )
     );
   };
+  const setRepoCollapsed = (repoFullName: string, collapsed: boolean) => {
+    setRepos((prev) =>
+      prev.map((repo) => (repo.repoFullName === repoFullName ? { ...repo, collapsed } : repo))
+    );
+  };
 
   const archiveTask = (sessionId: string) => {
     setTasks((prev) => prev.filter((task) => task.sessionId !== sessionId));
@@ -367,7 +377,10 @@ function StoryLayout(args: Parameters<typeof LoroSidebar>[0]) {
   const moveSession = (move: SessionListSessionMove) => {
     setSessionOrderByGroupKey((prev) => ({
       ...prev,
-      [move.groupKey]: mergeVisibleSidebarOrder(prev[move.groupKey] ?? [], move.nextSessionIds),
+      [move.orderKey ?? move.groupKey]: mergeVisibleSidebarOrder(
+        prev[move.orderKey ?? move.groupKey] ?? [],
+        move.nextSessionIds
+      ),
     }));
   };
 
@@ -438,6 +451,7 @@ function StoryLayout(args: Parameters<typeof LoroSidebar>[0]) {
         selectedSessionId,
         onSelect: setSelectedSessionId,
         onToggleRepoCollapsed: toggleRepoCollapsed,
+        onSetRepoCollapsed: setRepoCollapsed,
         onToggleChatsCollapsed: () => setChatsCollapsed((prev) => !prev),
         onArchiveSession: archiveTask,
         onTogglePinSession: togglePinned,
@@ -1045,6 +1059,8 @@ function DemoProjectSection({
   sessionsByProjectKey,
   manualSessionOrderByGroupKey,
   onMoveSession,
+  collapsedOpenedBySessionIds,
+  onToggleOpenedBySessions,
 }: {
   machineId: MachineId;
   machineName: string;
@@ -1062,6 +1078,8 @@ function DemoProjectSection({
   sessionsByProjectKey: Record<string, SessionMeta[]>;
   manualSessionOrderByGroupKey: SidebarSessionOrder;
   onMoveSession: (move: SessionListSessionMove) => void;
+  collapsedOpenedBySessionIds: Record<string, boolean>;
+  onToggleOpenedBySessions: (openerSessionId: string) => void;
 }) {
   const isMobile = useIsMobile();
   const sensors = useSensors(
@@ -1113,7 +1131,7 @@ function DemoProjectSection({
       {collapsed ? null : (
         <DndContext
           sensors={sensors}
-          collisionDetection={closestCenter}
+          collisionDetection={sidebarListCollisionDetection}
           modifiers={[restrictSidebarListDrag]}
           autoScroll={false}
           onDragStart={handleDragStart}
@@ -1130,6 +1148,7 @@ function DemoProjectSection({
                     id={String(project.id)}
                     disabled={projectIds.length < 2}
                     dragHandleLabel="Drag to reorder"
+                    sortGroup="projects"
                   >
                     {(dragHandle) => (
                       <LocalProjectItem
@@ -1141,6 +1160,7 @@ function DemoProjectSection({
                         collapsed={collapsedProjects[projectKey] ?? false}
                         isSelected={false}
                         sessionsForProject={sessionsByProjectKey[projectKey] ?? []}
+                        sessionOrderByGroupKey={manualSessionOrderByGroupKey}
                         manualSessionOrder={manualSessionOrderByGroupKey[projectKey] !== undefined}
                         childSessionsByParent={new Map()}
                         liveSessionStatuses={EMPTY_LIVE_SESSION_STATUSES}
@@ -1158,8 +1178,8 @@ function DemoProjectSection({
                         onNavigateProject={() => {}}
                         onNavigateSession={() => {}}
                         onArchive={() => {}}
-                        collapsedOpenedBySessionIds={{}}
-                        onToggleOpenedBySessions={() => {}}
+                        collapsedOpenedBySessionIds={collapsedOpenedBySessionIds}
+                        onToggleOpenedBySessions={onToggleOpenedBySessions}
                         resolveOpenerRowId={demoResolveOpenerRowId}
                         onToggleCollapsed={() => onToggleProjectCollapsed(projectKey)}
                         onRequestRemoval={() => {}}
@@ -1213,6 +1233,8 @@ function ProductionLikeTopContent({
       ...demoRemoteSessions,
     })
   );
+  const collapsedOpenedBySessionIds = useAtomValue(sidebarCollapsedOpenedBySessionsAtom);
+  const toggleOpenedBySessions = useSetAtom(toggleSidebarCollapsedOpenedBySessionAtom);
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const projectCollapseStates = useMemo(
     () =>
@@ -1236,18 +1258,46 @@ function ProductionLikeTopContent({
   const [collapsedProjects, setCollapsedProjects] =
     useState<Record<string, boolean>>(projectCollapseStates);
   const projectCollapseDragSnapshotRef = useRef<Record<string, boolean | undefined> | null>(null);
+  const machineCollapseDragSnapshotRef = useRef<{
+    sectionKey: string;
+    collapsed: boolean | undefined;
+  } | null>(null);
   const machineSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
   const remoteMachineIds = remoteProjectSections.map((section) => String(section.machineId));
+  const handleMachineDragStart = (event: DragStartEvent) => {
+    const sectionKey = String(event.active.id);
+    if (!remoteMachineIds.includes(sectionKey)) return;
+    machineCollapseDragSnapshotRef.current = {
+      sectionKey,
+      collapsed: collapsedSections[sectionKey],
+    };
+    setCollapsedSections((prev) => ({ ...prev, [sectionKey]: true }));
+  };
+  const restoreMachineCollapse = () => {
+    const snapshot = machineCollapseDragSnapshotRef.current;
+    if (!snapshot) return;
+    machineCollapseDragSnapshotRef.current = null;
+    setCollapsedSections((prev) => {
+      const next = { ...prev };
+      if (snapshot.collapsed === undefined) delete next[snapshot.sectionKey];
+      else next[snapshot.sectionKey] = snapshot.collapsed;
+      return next;
+    });
+  };
   const handleMachineDragEnd = (event: DragEndEvent) => {
-    const overId = event.over?.id;
-    if (!overId) return;
-    const fromIndex = remoteMachineIds.indexOf(String(event.active.id));
-    const toIndex = remoteMachineIds.indexOf(String(overId));
-    if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
-    setRemoteProjectSections((sections) => arrayMove(sections, fromIndex, toIndex));
+    try {
+      const overId = event.over?.id;
+      if (!overId) return;
+      const fromIndex = remoteMachineIds.indexOf(String(event.active.id));
+      const toIndex = remoteMachineIds.indexOf(String(overId));
+      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
+      setRemoteProjectSections((sections) => arrayMove(sections, fromIndex, toIndex));
+    } finally {
+      restoreMachineCollapse();
+    }
   };
   const startProjectDrag = (machineId: MachineId, projectIds: readonly string[]) => {
     const previousState: Record<string, boolean | undefined> = {};
@@ -1283,16 +1333,36 @@ function ProductionLikeTopContent({
     onMoveSession(move);
     setProjectSessionsByKey((prev) => {
       const current = prev[move.groupKey] ?? [];
+      const orderKey = move.orderKey ?? move.groupKey;
       const byId = new Map(current.map((session) => [session.id, session]));
+      const orderedCurrent =
+        orderKey === move.groupKey
+          ? current
+          : current.filter(
+              (session) =>
+                (session.openedByRootSessionId ??
+                  demoResolveOpenerRowId(session.openedBySessionId)) === move.parentSessionId
+            );
+      const orderedIds = reconcileVisibleSidebarOrder(
+        move.nextSessionIds,
+        orderedCurrent.map((session) => session.id)
+      );
       return {
         ...prev,
-        [move.groupKey]: reconcileVisibleSidebarOrder(
-          move.nextSessionIds,
-          current.map((session) => session.id)
-        ).flatMap((id) => {
-          const session = byId.get(id as SessionId);
-          return session ? [session] : [];
-        }),
+        [move.groupKey]:
+          orderKey === move.groupKey
+            ? orderedIds.flatMap((id) => {
+                const session = byId.get(id as SessionId);
+                return session ? [session] : [];
+              })
+            : (() => {
+                const orderedSet = new Set(orderedIds);
+                let index = 0;
+                return current.map((session) => {
+                  if (!orderedSet.has(session.id)) return session;
+                  return byId.get(orderedIds[index++] as SessionId) ?? session;
+                });
+              })(),
       };
     });
   };
@@ -1335,12 +1405,17 @@ function ProductionLikeTopContent({
         sessionsByProjectKey={projectSessionsByKey}
         manualSessionOrderByGroupKey={sessionOrderByGroupKey}
         onMoveSession={moveProjectSession}
+        collapsedOpenedBySessionIds={collapsedOpenedBySessionIds}
+        onToggleOpenedBySessions={toggleOpenedBySessions}
       />
 
       <DndContext
         sensors={machineSensors}
-        collisionDetection={closestCenter}
+        collisionDetection={sidebarListCollisionDetection}
+        modifiers={[restrictSidebarListDrag]}
         autoScroll={false}
+        onDragStart={handleMachineDragStart}
+        onDragCancel={restoreMachineCollapse}
         onDragEnd={handleMachineDragEnd}
       >
         <SortableContext items={remoteMachineIds} strategy={verticalListSortingStrategy}>
@@ -1350,6 +1425,7 @@ function ProductionLikeTopContent({
               id={String(section.machineId)}
               disabled={remoteMachineIds.length < 2}
               dragHandleLabel="Drag to reorder"
+              sortGroup="machines"
             >
               {(machineDragHandle) => (
                 <DemoProjectSection
@@ -1374,6 +1450,8 @@ function ProductionLikeTopContent({
                   sessionsByProjectKey={projectSessionsByKey}
                   manualSessionOrderByGroupKey={sessionOrderByGroupKey}
                   onMoveSession={moveProjectSession}
+                  collapsedOpenedBySessionIds={collapsedOpenedBySessionIds}
+                  onToggleOpenedBySessions={toggleOpenedBySessions}
                 />
               )}
             </SortableSidebarOrderItem>
@@ -1464,7 +1542,10 @@ function WithProjectsLayout(args: Parameters<typeof LoroSidebar>[0]) {
   const moveSession = (move: SessionListSessionMove) => {
     setSessionOrderByGroupKey((prev) => ({
       ...prev,
-      [move.groupKey]: mergeVisibleSidebarOrder(prev[move.groupKey] ?? [], move.nextSessionIds),
+      [move.orderKey ?? move.groupKey]: mergeVisibleSidebarOrder(
+        prev[move.orderKey ?? move.groupKey] ?? [],
+        move.nextSessionIds
+      ),
     }));
   };
 
@@ -1473,6 +1554,11 @@ function WithProjectsLayout(args: Parameters<typeof LoroSidebar>[0]) {
       prev.map((repo) =>
         repo.repoFullName === repoFullName ? { ...repo, collapsed: !repo.collapsed } : repo
       )
+    );
+  };
+  const setRepoCollapsed = (repoFullName: string, collapsed: boolean) => {
+    setRepos((prev) =>
+      prev.map((repo) => (repo.repoFullName === repoFullName ? { ...repo, collapsed } : repo))
     );
   };
 
@@ -1512,6 +1598,7 @@ function WithProjectsLayout(args: Parameters<typeof LoroSidebar>[0]) {
         selectedSessionId,
         onSelectSession: setSelectedSessionId,
         onToggleRepoCollapsed: toggleRepoCollapsed,
+        onSetRepoCollapsed: setRepoCollapsed,
         onArchiveSession: archiveTask,
         onTogglePinSession: togglePinned,
         onNew: createTask,

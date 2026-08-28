@@ -1,6 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
-  closestCenter,
   DndContext,
   KeyboardSensor,
   PointerSensor,
@@ -52,6 +51,7 @@ import {
   ONLY_CHATS_KEY,
   sessionSidebarCodeChangesOnlyAtom,
   sidebarCollapsedOpenedBySessionsAtom,
+  setSidebarCollapsedOpenedBySessionAtom,
   toggleSidebarCollapsedOpenedBySessionAtom,
   sidebarShowFullListAtom,
   setMobileDrawerOpenAtom,
@@ -88,6 +88,7 @@ import {
   repoCollapseStateAtom,
   repoOrderAtom,
   sidebarSessionOrderAtom,
+  type SidebarSessionOrder,
   sidebarCollapsedAtom,
   sidebarLastWidthAtom,
   sidebarOrganizeModeAtom,
@@ -138,6 +139,7 @@ import {
   SidebarSortableList,
   shallowEqualExceptKeys,
   SortableSidebarOrderItem,
+  sidebarListCollisionDetection,
   restrictSidebarListDrag,
   type SessionListPullRequestOpen,
   type SessionListRepoMove,
@@ -196,6 +198,7 @@ import {
   buildOpenedBySessionTree,
   hasOpenedByTreeNesting,
   normalizeSessionRowId,
+  type OpenedBySessionTreeNode,
 } from '@/lib/session-opened-by-tree';
 import { SessionInfoHoverCard } from '@/components/session-info-hover-card';
 import { SessionShareDialog } from '@/components/session-sharing';
@@ -946,6 +949,7 @@ export type LocalProjectItemProps = {
   isSelected: boolean;
   sessionsForProject: SessionMeta[];
   manualSessionOrder?: boolean;
+  sessionOrderByGroupKey?: SidebarSessionOrder;
   /**
    * Map of parent session id -> non-archived child sessions. Used to roll up
    * sub-session activity time into the parent row's displayed timestamp.
@@ -1017,6 +1021,7 @@ export const LocalProjectItem = memo(function LocalProjectItem({
   isSelected,
   sessionsForProject,
   manualSessionOrder = false,
+  sessionOrderByGroupKey = {},
   childSessionsByParent,
   liveSessionStatuses,
   resolveSessionAuthor,
@@ -1047,64 +1052,125 @@ export const LocalProjectItem = memo(function LocalProjectItem({
   onRequestRemoval,
 }: LocalProjectItemProps) {
   const { t } = useTranslation();
+  const groupKey = `${machineId}:${project.id}`;
   // Same opened-by presentation the GitHub/Chats groups use: MCP-opened
   // independent Sessions indent under the Session that created them, and a
   // list with no such relationship keeps its previous flat geometry.
-  const sessionNodes = useMemo(
-    () =>
-      buildOpenedBySessionTree(sessionsForProject, {
-        getId: (session) => session.id,
-        // Nest under the opener's sidebar ROW, not necessarily the precise
-        // opener: a Session created from a child Tab belongs under that Tab's
-        // root Session, because child Tabs have no row here.
-        getOpenedBySessionId: (session) =>
-          session.openedByRootSessionId ?? resolveOpenerRowId(session.openedBySessionId),
-        isCollapsed: (openerId) => collapsedOpenedBySessionIds[openerId] === true,
-        // Before a user chooses an order, an opener follows its freshest child.
-        // Once manually ordered, incoming root order is authoritative.
-        ...(manualSessionOrder
-          ? {}
-          : {
-              rootRank: (session: SessionMeta) =>
-                getEffectiveLatestMessageAt(session, childSessionsByParent),
-            }),
-      }),
-    [
-      childSessionsByParent,
-      collapsedOpenedBySessionIds,
-      manualSessionOrder,
-      resolveOpenerRowId,
-      sessionsForProject,
-    ]
-  );
+  const sessionNodes = useMemo(() => {
+    const childOrder = (openerId: string, children: readonly SessionMeta[]) => {
+      const savedIds = sessionOrderByGroupKey[`${groupKey}:children:${openerId}`];
+      if (!savedIds) return children;
+      const byId = new Map(children.map((session) => [session.id, session]));
+      return reconcileVisibleSidebarOrder(
+        savedIds,
+        children.map((session) => session.id)
+      ).flatMap((id) => {
+        const session = byId.get(id as SessionId);
+        return session ? [session] : [];
+      });
+    };
+    return buildOpenedBySessionTree(sessionsForProject, {
+      getId: (session) => session.id,
+      // Nest under the opener's sidebar ROW, not necessarily the precise
+      // opener: a Session created from a child Tab belongs under that Tab's
+      // root Session, because child Tabs have no row here.
+      getOpenedBySessionId: (session) =>
+        session.openedByRootSessionId ?? resolveOpenerRowId(session.openedBySessionId),
+      isCollapsed: (openerId) => collapsedOpenedBySessionIds[openerId] === true,
+      childOrder,
+      // Before a user chooses an order, an opener follows its freshest child.
+      // Once manually ordered, incoming root order is authoritative.
+      ...(manualSessionOrder
+        ? {}
+        : {
+            rootRank: (session: SessionMeta) =>
+              getEffectiveLatestMessageAt(session, childSessionsByParent),
+          }),
+    });
+  }, [
+    childSessionsByParent,
+    collapsedOpenedBySessionIds,
+    manualSessionOrder,
+    resolveOpenerRowId,
+    sessionOrderByGroupKey,
+    sessionsForProject,
+  ]);
   const showTreeGutter = hasOpenedByTreeNesting(sessionNodes);
-  const sortableSessionIds = useMemo(
-    () => sessionNodes.filter((node) => node.depth === 0).map((node) => node.id),
+  const sortableSessionIds = useMemo(() => sessionNodes.map((node) => node.id), [sessionNodes]);
+  const sortableIdsForNode = useCallback(
+    (node: OpenedBySessionTreeNode<SessionMeta>) =>
+      sessionNodes
+        .filter((candidate) =>
+          node.depth === 0
+            ? candidate.depth === 0
+            : candidate.depth === 1 && candidate.openedById === node.openedById
+        )
+        .map((candidate) => candidate.id),
     [sessionNodes]
   );
-  const canReorderSessions = typeof onMoveSession === 'function' && sortableSessionIds.length > 1;
-  const groupKey = `${machineId}:${project.id}`;
+  const canReorderSessions =
+    typeof onMoveSession === 'function' &&
+    sessionNodes.some((node) => sortableIdsForNode(node).length > 1);
+  const dragCollapseSnapshotRef = useRef<boolean | undefined>(undefined);
+  const activeDragOpenerRef = useRef<string | null>(null);
+  const setCollapsedOpenedBySession = useSetAtom(setSidebarCollapsedOpenedBySessionAtom);
+  const handleSessionDragStart = useCallback(
+    (event: DragStartEvent) => {
+      const node = sessionNodes.find((candidate) => candidate.id === String(event.active.id));
+      if (!node || node.depth !== 0 || node.childCount === 0) return;
+      activeDragOpenerRef.current = node.id;
+      dragCollapseSnapshotRef.current = collapsedOpenedBySessionIds[node.id];
+      setCollapsedOpenedBySession({ openerSessionId: node.id, collapsed: true });
+    },
+    [collapsedOpenedBySessionIds, sessionNodes, setCollapsedOpenedBySession]
+  );
+  const restoreSessionDragCollapse = useCallback(() => {
+    const openerSessionId = activeDragOpenerRef.current;
+    if (!openerSessionId) return;
+    activeDragOpenerRef.current = null;
+    const collapsed = dragCollapseSnapshotRef.current;
+    dragCollapseSnapshotRef.current = undefined;
+    setCollapsedOpenedBySession({ openerSessionId, collapsed });
+  }, [setCollapsedOpenedBySession]);
   const handleSessionDragEnd = useCallback(
     (event: DragEndEvent) => {
-      if (!canReorderSessions) return;
-      const overId = event.over?.id;
-      if (!overId) return;
-      const activeSessionId = String(event.active.id);
-      const overSessionId = String(overId);
-      if (activeSessionId === overSessionId) return;
-      const fromIndex = sortableSessionIds.indexOf(activeSessionId);
-      const toIndex = sortableSessionIds.indexOf(overSessionId);
-      if (fromIndex < 0 || toIndex < 0) return;
-      onMoveSession?.({
-        groupKey,
-        activeSessionId,
-        overSessionId,
-        fromIndex,
-        toIndex,
-        nextSessionIds: arrayMove(sortableSessionIds, fromIndex, toIndex),
-      });
+      try {
+        if (!canReorderSessions) return;
+        const activeSessionId = String(event.active.id);
+        const activeNode = sessionNodes.find((node) => node.id === activeSessionId);
+        const overSessionId = event.over ? String(event.over.id) : null;
+        const overNode = overSessionId
+          ? sessionNodes.find((node) => node.id === overSessionId)
+          : undefined;
+        if (!activeNode || !overNode || !overSessionId) return;
+        const sortableIds = sortableIdsForNode(activeNode);
+        if (sortableIdsForNode(overNode).join('\0') !== sortableIds.join('\0')) return;
+        const fromIndex = sortableIds.indexOf(activeSessionId);
+        const toIndex = sortableIds.indexOf(overSessionId);
+        if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
+        const parentSessionId = activeNode.depth === 1 ? activeNode.openedById : null;
+        onMoveSession?.({
+          groupKey,
+          orderKey: parentSessionId ? `${groupKey}:children:${parentSessionId}` : undefined,
+          parentSessionId,
+          activeSessionId,
+          overSessionId,
+          fromIndex,
+          toIndex,
+          nextSessionIds: arrayMove(sortableIds, fromIndex, toIndex),
+        });
+      } finally {
+        restoreSessionDragCollapse();
+      }
     },
-    [canReorderSessions, groupKey, onMoveSession, sortableSessionIds]
+    [
+      canReorderSessions,
+      groupKey,
+      onMoveSession,
+      restoreSessionDragCollapse,
+      sessionNodes,
+      sortableIdsForNode,
+    ]
   );
   const trimmedMachineName =
     typeof machineName === 'string' && machineName.trim() ? machineName.trim() : null;
@@ -1255,7 +1321,12 @@ export const LocalProjectItem = memo(function LocalProjectItem({
       </div>
 
       {!collapsed ? (
-        <SidebarSortableList ids={sortableSessionIds} onDragEnd={handleSessionDragEnd}>
+        <SidebarSortableList
+          ids={sortableSessionIds}
+          onDragStart={handleSessionDragStart}
+          onDragCancel={restoreSessionDragCollapse}
+          onDragEnd={handleSessionDragEnd}
+        >
           {sessionNodes.map((node) => {
             const session = node.item;
             const activity = getEffectiveSessionActivitySummary(
@@ -1300,13 +1371,13 @@ export const LocalProjectItem = memo(function LocalProjectItem({
                 />
               </SessionOpenedByTreeRow>
             );
-            if (node.depth !== 0) return treeRow();
             return (
               <SortableSidebarOrderItem
                 key={session.id}
                 id={session.id}
-                disabled={!canReorderSessions}
+                disabled={!canReorderSessions || sortableIdsForNode(node).length < 2}
                 dragHandleLabel={t('sessions.messageQueue.dragToReorder', 'Drag to reorder')}
+                sortGroup={node.depth === 0 ? 'root' : `child:${node.openedById}`}
               >
                 {treeRow}
               </SortableSidebarOrderItem>
@@ -1745,12 +1816,10 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
   const handleMoveSession = useCallback(
     (move: SessionListSessionMove) => {
       const current = sidebarSessionOrderRef.current;
+      const orderKey = move.orderKey ?? move.groupKey;
       setSidebarSessionOrder({
         ...current,
-        [move.groupKey]: mergeVisibleSidebarOrder(
-          current[move.groupKey] ?? [],
-          move.nextSessionIds
-        ),
+        [orderKey]: mergeVisibleSidebarOrder(current[orderKey] ?? [], move.nextSessionIds),
       });
     },
     [setSidebarSessionOrder]
@@ -2276,26 +2345,57 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
         .map((section) => String(section.sectionKey)),
     [localProjectSections]
   );
+  const machineCollapseDragSnapshotRef = useRef<{
+    sectionKey: string;
+    collapsed: boolean | undefined;
+  } | null>(null);
+  const handleRemoteSectionDragStart = useCallback(
+    (event: DragStartEvent) => {
+      const sectionKey = String(event.active.id);
+      if (!remoteSectionIds.includes(sectionKey)) return;
+      machineCollapseDragSnapshotRef.current = {
+        sectionKey,
+        collapsed: localProjectsSectionCollapseState[sectionKey],
+      };
+      setLocalProjectsSectionCollapseState((prev) => ({ ...prev, [sectionKey]: true }));
+    },
+    [localProjectsSectionCollapseState, remoteSectionIds, setLocalProjectsSectionCollapseState]
+  );
+  const restoreMachineCollapse = useCallback(() => {
+    const snapshot = machineCollapseDragSnapshotRef.current;
+    if (!snapshot) return;
+    machineCollapseDragSnapshotRef.current = null;
+    setLocalProjectsSectionCollapseState((prev) => {
+      const next = { ...prev };
+      if (snapshot.collapsed === undefined) delete next[snapshot.sectionKey];
+      else next[snapshot.sectionKey] = snapshot.collapsed;
+      return next;
+    });
+  }, [setLocalProjectsSectionCollapseState]);
   const handleRemoteSectionDragEnd = useCallback(
     (event: DragEndEvent) => {
-      const overId = event.over?.id;
-      if (!overId) return;
-      const fromIndex = remoteSectionIds.indexOf(String(event.active.id));
-      const toIndex = remoteSectionIds.indexOf(String(overId));
-      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
+      try {
+        const overId = event.over?.id;
+        if (!overId) return;
+        const fromIndex = remoteSectionIds.indexOf(String(event.active.id));
+        const toIndex = remoteSectionIds.indexOf(String(overId));
+        if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
 
-      const current = localProjectSidebarOrderRef.current;
-      const next = {
-        ...current,
-        remoteMachineIds: mergeVisibleSidebarOrder(
-          current.remoteMachineIds,
-          arrayMove(remoteSectionIds, fromIndex, toIndex)
-        ),
-      };
-      localProjectSidebarOrderRef.current = next;
-      setLocalProjectSidebarOrder(next);
+        const current = localProjectSidebarOrderRef.current;
+        const next = {
+          ...current,
+          remoteMachineIds: mergeVisibleSidebarOrder(
+            current.remoteMachineIds,
+            arrayMove(remoteSectionIds, fromIndex, toIndex)
+          ),
+        };
+        localProjectSidebarOrderRef.current = next;
+        setLocalProjectSidebarOrder(next);
+      } finally {
+        restoreMachineCollapse();
+      }
     },
-    [remoteSectionIds, setLocalProjectSidebarOrder]
+    [remoteSectionIds, restoreMachineCollapse, setLocalProjectSidebarOrder]
   );
   const handleProjectDragStart = useCallback(
     (machineId: MachineId, projectIds: readonly string[], event: DragStartEvent) => {
@@ -2388,8 +2488,11 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
       // when expanded, 4px when collapsed so folded sections stack compactly.
       <DndContext
         sensors={sidebarOrderSensors}
-        collisionDetection={closestCenter}
+        collisionDetection={sidebarListCollisionDetection}
+        modifiers={[restrictSidebarListDrag]}
         autoScroll={false}
+        onDragStart={handleRemoteSectionDragStart}
+        onDragCancel={restoreMachineCollapse}
         onDragEnd={handleRemoteSectionDragEnd}
       >
         <SortableContext items={remoteSectionIds} strategy={verticalListSortingStrategy}>
@@ -2452,7 +2555,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
                     {sectionCollapsed || !section.machineId ? null : (
                       <DndContext
                         sensors={sidebarOrderSensors}
-                        collisionDetection={closestCenter}
+                        collisionDetection={sidebarListCollisionDetection}
                         modifiers={[restrictSidebarListDrag]}
                         autoScroll={false}
                         onDragStart={(event) =>
@@ -2487,6 +2590,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
                                   id={String(project.id)}
                                   disabled={projectIds.length < 2 || removalState !== null}
                                   dragHandleLabel={dragToReorderLabel}
+                                  sortGroup="projects"
                                 >
                                   {(projectDragHandle) => (
                                     <LocalProjectItem
@@ -2499,6 +2603,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
                                       collapsed={collapsed}
                                       isSelected={isSelected}
                                       sessionsForProject={sessionsForProject}
+                                      sessionOrderByGroupKey={sidebarSessionOrder}
                                       manualSessionOrder={
                                         sidebarSessionOrder[projectKey] !== undefined
                                       }
@@ -2549,6 +2654,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
                   id={String(section.sectionKey)}
                   disabled={remoteSectionIds.length < 2}
                   dragHandleLabel={dragToReorderLabel}
+                  sortGroup="machines"
                 >
                   {renderSection}
                 </SortableSidebarOrderItem>
@@ -2937,6 +3043,12 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
     },
     [setRepoCollapseState]
   );
+  const handleSetRepoCollapsed = useCallback(
+    (repoFullName: string, collapsed: boolean) => {
+      setRepoCollapseState((prev) => ({ ...prev, [repoFullName]: collapsed }));
+    },
+    [setRepoCollapseState]
+  );
 
   const handleMoveRepo = useCallback(
     (move: SessionListRepoMove) => {
@@ -2967,6 +3079,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
       onCopySessionUrl: handleCopySessionUrl,
       onShareSessionWithTeam: handleRequestShareSession,
       onToggleRepoCollapsed: handleToggleRepoCollapsed,
+      onSetRepoCollapsed: handleSetRepoCollapsed,
       onMoveRepo: handleMoveRepo,
       sessionOrderByGroupKey: sidebarSessionOrder,
       onMoveSession: handleMoveSession,
@@ -2989,6 +3102,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
       handleOpenTaskPullRequest,
       handleNavigateToSession,
       handleToggleRepoCollapsed,
+      handleSetRepoCollapsed,
       workspaceRepoSessions,
       repos,
       selectedSessionId,

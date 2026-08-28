@@ -86,3 +86,14 @@ export const toggleSidebarCollapsedOpenedBySessionAtom = atom(
     });
   }
 );
+
+export const setSidebarCollapsedOpenedBySessionAtom = atom(
+  null,
+  (get, set, update: { openerSessionId: string; collapsed: boolean | undefined }) => {
+    const current = get(sidebarCollapsedOpenedBySessionsAtom);
+    const next = { ...current };
+    if (update.collapsed === undefined) delete next[update.openerSessionId];
+    else next[update.openerSessionId] = update.collapsed;
+    set(sidebarCollapsedOpenedBySessionsAtom, next);
+  }
+);

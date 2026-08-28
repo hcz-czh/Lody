@@ -1,9 +1,12 @@
 import { cn } from '@/lib/utils';
 import {
   closestCenter,
+  type CollisionDetection,
   DndContext,
+  type DragCancelEvent,
   type DragEndEvent,
   type Modifier,
+  type DragStartEvent,
   KeyboardSensor,
   PointerSensor,
   useSensor,
@@ -37,6 +40,7 @@ import {
   useCallback,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -64,6 +68,7 @@ import {
   ONLY_CHATS_KEY,
   sidebarCollapsedOpenedBySessionsAtom,
   sidebarShowFullListAtom,
+  setSidebarCollapsedOpenedBySessionAtom,
   toggleSidebarCollapsedOpenedBySessionAtom,
 } from '@/atoms/focus-layer';
 import { reconcileVisibleSidebarOrder, type SidebarSessionOrder } from '@/atoms/sidebar-state';
@@ -167,7 +172,11 @@ export type SessionListRepoMove = {
 };
 
 export type SessionListSessionMove = {
+  /** Owning repo/project group. Stable even when a nested child order is moved. */
   groupKey: string;
+  /** Optional persistence key for a nested sibling list. */
+  orderKey?: string;
+  parentSessionId?: string | null;
   activeSessionId: string;
   overSessionId: string;
   fromIndex: number;
@@ -196,6 +205,8 @@ export type SessionListProps = {
   /** Navigate to a root Session while restoring the precise child Tab. */
   onNavigateSessionTab?: (sessionId: string, tabSessionId: string) => void;
   onToggleRepoCollapsed?: (repoFullName: string) => void;
+  /** Set a repo's collapsed state without toggling it. Used while sorting. */
+  onSetRepoCollapsed?: (repoFullName: string, collapsed: boolean) => void;
   onToggleChatsCollapsed?: () => void;
   onArchiveSession?: (sessionId: string) => void;
   onRenameSession?: (sessionId: string, nextTitle: string) => void | Promise<void>;
@@ -269,24 +280,41 @@ const EMPTY_TREE_NODES: OpenedBySessionTreeNode<SessionListRow>[] = [];
 export function getVisibleSessionGroupTree(
   group: SessionRowGroup,
   whetherShowFullList: boolean,
-  collapsedOpenedBySessionIds?: Record<string, boolean>
+  collapsedOpenedBySessionIds?: Record<string, boolean>,
+  sessionOrderByGroupKey?: SidebarSessionOrder
 ): OpenedBySessionTreeNode<SessionListRow>[] {
   return buildOpenedBySessionTree(group.sessions, {
     ...SESSION_ROW_OPENED_BY_TREE_ACCESSORS,
     isCollapsed: (openerId) => collapsedOpenedBySessionIds?.[openerId] === true,
     ...(group.manualOrder ? {} : { rootRank: sessionRowRootRank }),
     ...(whetherShowFullList ? {} : { maxRoots: MAX_VISIBLE_SESSIONS }),
+    childOrder: (openerId, children) => {
+      const savedIds = sessionOrderByGroupKey?.[`${group.key}:children:${openerId}`];
+      if (!savedIds) return children;
+      const byId = new Map(children.map((session) => [session.sessionId, session]));
+      return reconcileVisibleSidebarOrder(
+        savedIds,
+        children.map((session) => session.sessionId)
+      ).flatMap((id) => {
+        const session = byId.get(id);
+        return session ? [session] : [];
+      });
+    },
   });
 }
 
 export function getVisibleSessionGroupRows(
   group: SessionRowGroup,
   whetherShowFullList: boolean,
-  collapsedOpenedBySessionIds?: Record<string, boolean>
+  collapsedOpenedBySessionIds?: Record<string, boolean>,
+  sessionOrderByGroupKey?: SidebarSessionOrder
 ): SessionListRow[] {
-  return getVisibleSessionGroupTree(group, whetherShowFullList, collapsedOpenedBySessionIds).map(
-    (node) => node.item
-  );
+  return getVisibleSessionGroupTree(
+    group,
+    whetherShowFullList,
+    collapsedOpenedBySessionIds,
+    sessionOrderByGroupKey
+  ).map((node) => node.item);
 }
 
 /** True when the group has more TOP-LEVEL rows than the compact preview shows. */
@@ -537,11 +565,13 @@ export function SortableSidebarOrderItem({
   id,
   disabled,
   dragHandleLabel,
+  sortGroup,
   children,
 }: {
   id: string;
   disabled: boolean;
   dragHandleLabel: string;
+  sortGroup?: string;
   children: ReactNode | ((dragHandle: ReactNode) => ReactNode);
 }) {
   const {
@@ -552,7 +582,7 @@ export function SortableSidebarOrderItem({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id, disabled });
+  } = useSortable({ id, disabled, data: sortGroup ? { sidebarSortGroup: sortGroup } : undefined });
   const constrainedTransform = transform
     ? {
         ...transform,
@@ -610,6 +640,7 @@ export function SortableSidebarOrderItem({
       }}
       className={cn('w-full', isDragging && 'opacity-60')}
       data-sidebar-sortable-id={id}
+      data-sidebar-sort-group={sortGroup}
     >
       {content}
     </div>
@@ -627,7 +658,9 @@ export const restrictSidebarListDrag: Modifier = ({
     scaleX: 1,
     scaleY: 1,
   };
-  if (!activeNodeRect || !containerNodeRect) return constrainedTransform;
+  if (!activeNodeRect) return constrainedTransform;
+
+  if (!containerNodeRect) return constrainedTransform;
 
   const minY = containerNodeRect.top - activeNodeRect.top;
   const maxY = Math.max(minY, containerNodeRect.bottom - activeNodeRect.bottom);
@@ -637,13 +670,28 @@ export const restrictSidebarListDrag: Modifier = ({
   };
 };
 
+export const sidebarListCollisionDetection: CollisionDetection = (args) => {
+  const activeSortGroup = args.active.data.current?.sidebarSortGroup;
+  if (!activeSortGroup) return closestCenter(args);
+  return closestCenter({
+    ...args,
+    droppableContainers: args.droppableContainers.filter(
+      (container) => container.data.current?.sidebarSortGroup === activeSortGroup
+    ),
+  });
+};
+
 export function SidebarSortableList({
   ids,
   onDragEnd,
+  onDragStart,
+  onDragCancel,
   children,
 }: {
   ids: readonly string[];
   onDragEnd: (event: DragEndEvent) => void;
+  onDragStart?: (event: DragStartEvent) => void;
+  onDragCancel?: (event: DragCancelEvent) => void;
   children: ReactNode;
 }) {
   const sensors = useSensors(
@@ -653,9 +701,11 @@ export function SidebarSortableList({
   return (
     <DndContext
       sensors={sensors}
-      collisionDetection={closestCenter}
+      collisionDetection={sidebarListCollisionDetection}
       modifiers={[restrictSidebarListDrag]}
       autoScroll={false}
+      onDragStart={onDragStart}
+      onDragCancel={onDragCancel}
       onDragEnd={onDragEnd}
     >
       <SortableContext items={[...ids]} strategy={verticalListSortingStrategy}>
@@ -684,6 +734,7 @@ type SessionGroupSectionProps = {
   onOpenPullRequest?: (request: SessionListPullRequestOpen) => void;
   onToggleFullList?: (groupKey: string) => void;
   onMoveSession?: (move: SessionListSessionMove) => void;
+  sessionOrderByGroupKey: SidebarSessionOrder;
   dragHandleLabel: string;
   /** Opener session ids whose opened Sessions are hidden. */
   collapsedOpenedBySessionIds: Record<string, boolean>;
@@ -738,6 +789,7 @@ const SessionGroupSection = memo(function SessionGroupSection({
   onOpenPullRequest,
   onToggleFullList,
   onMoveSession,
+  sessionOrderByGroupKey = {},
   dragHandleLabel,
   collapsedOpenedBySessionIds,
   onToggleOpenedBySessions,
@@ -755,6 +807,8 @@ const SessionGroupSection = memo(function SessionGroupSection({
   const moreActionsLabel = t('sessions.moreActions', 'More actions');
   const showGroupHeaderIcon = group.kind === 'repo';
   const [renameTarget, setRenameTarget] = useState<RenameSessionDialogTarget | null>(null);
+  const dragCollapseSnapshotRef = useRef<boolean | undefined>(undefined);
+  const setCollapsedOpenedBySession = useSetAtom(setSidebarCollapsedOpenedBySessionAtom);
   const beginRename = useCallback((sessionId: string, currentTitle: string) => {
     setRenameTarget({ sessionId: sessionId as SessionId, initialTitle: currentTitle });
   }, []);
@@ -795,7 +849,8 @@ const SessionGroupSection = memo(function SessionGroupSection({
     const nodes = getVisibleSessionGroupTree(
       group,
       whetherShowFullList,
-      collapsedOpenedBySessionIds
+      collapsedOpenedBySessionIds,
+      sessionOrderByGroupKey
     );
     return {
       canToggleFullList: sessionGroupOverflowsPreview(group),
@@ -804,33 +859,81 @@ const SessionGroupSection = memo(function SessionGroupSection({
       // tree wrapper. Within it, unrelated top-level rows keep flat geometry.
       showTreeGutter: hasOpenedByTreeNesting(nodes),
     };
-  }, [collapsedOpenedBySessionIds, group, whetherShowFullList]);
-  const sortableSessionIds = useMemo(
-    () => visibleNodes.filter((node) => node.depth === 0).map((node) => node.id),
+  }, [collapsedOpenedBySessionIds, group, sessionOrderByGroupKey, whetherShowFullList]);
+  const sortableSessionIds = useMemo(() => visibleNodes.map((node) => node.id), [visibleNodes]);
+  const sortableIdsForNode = useCallback(
+    (node: OpenedBySessionTreeNode<SessionListRow>) =>
+      visibleNodes
+        .filter((candidate) =>
+          node.depth === 0
+            ? candidate.depth === 0
+            : candidate.depth === 1 && candidate.openedById === node.openedById
+        )
+        .map((candidate) => candidate.id),
     [visibleNodes]
   );
-  const canReorderSessions = typeof onMoveSession === 'function' && sortableSessionIds.length > 1;
+  const canReorderSessions =
+    typeof onMoveSession === 'function' &&
+    visibleNodes.some((node) => sortableIdsForNode(node).length > 1);
+  const activeDragOpenerRef = useRef<string | null>(null);
+  const handleSessionDragStart = useCallback(
+    (event: DragStartEvent) => {
+      const node = visibleNodes.find((candidate) => candidate.id === String(event.active.id));
+      if (!node || node.depth !== 0 || node.childCount === 0) return;
+      activeDragOpenerRef.current = node.id;
+      dragCollapseSnapshotRef.current = collapsedOpenedBySessionIds[node.id];
+      setCollapsedOpenedBySession({ openerSessionId: node.id, collapsed: true });
+    },
+    [collapsedOpenedBySessionIds, setCollapsedOpenedBySession, visibleNodes]
+  );
+  const restoreSessionDragCollapse = useCallback(() => {
+    const openerSessionId = activeDragOpenerRef.current;
+    if (!openerSessionId) return;
+    activeDragOpenerRef.current = null;
+    const collapsed = dragCollapseSnapshotRef.current;
+    dragCollapseSnapshotRef.current = undefined;
+    setCollapsedOpenedBySession({ openerSessionId, collapsed });
+  }, [setCollapsedOpenedBySession]);
   const handleSessionDragEnd = useCallback(
     (event: DragEndEvent) => {
-      if (!canReorderSessions) return;
-      const overId = event.over?.id;
-      if (!overId) return;
-      const activeSessionId = String(event.active.id);
-      const overSessionId = String(overId);
-      if (activeSessionId === overSessionId) return;
-      const fromIndex = sortableSessionIds.indexOf(activeSessionId);
-      const toIndex = sortableSessionIds.indexOf(overSessionId);
-      if (fromIndex < 0 || toIndex < 0) return;
-      onMoveSession?.({
-        groupKey: group.key,
-        activeSessionId,
-        overSessionId,
-        fromIndex,
-        toIndex,
-        nextSessionIds: arrayMove(sortableSessionIds, fromIndex, toIndex),
-      });
+      try {
+        if (!canReorderSessions) return;
+        const activeSessionId = String(event.active.id);
+        const activeNode = visibleNodes.find((node) => node.id === activeSessionId);
+        const overSessionId = event.over ? String(event.over.id) : null;
+        const overNode = overSessionId
+          ? visibleNodes.find((node) => node.id === overSessionId)
+          : undefined;
+        if (!activeNode || !overNode || !overSessionId) return;
+        const sortableIds = sortableIdsForNode(activeNode);
+        if (sortableIdsForNode(overNode).join('\0') !== sortableIds.join('\0')) return;
+        if (activeSessionId === overSessionId) return;
+        const fromIndex = sortableIds.indexOf(activeSessionId);
+        const toIndex = sortableIds.indexOf(overSessionId);
+        if (fromIndex < 0 || toIndex < 0) return;
+        const parentSessionId = activeNode.depth === 1 ? activeNode.openedById : null;
+        onMoveSession?.({
+          groupKey: group.key,
+          orderKey: parentSessionId ? `${group.key}:children:${parentSessionId}` : undefined,
+          parentSessionId,
+          activeSessionId,
+          overSessionId,
+          fromIndex,
+          toIndex,
+          nextSessionIds: arrayMove(sortableIds, fromIndex, toIndex),
+        });
+      } finally {
+        restoreSessionDragCollapse();
+      }
     },
-    [canReorderSessions, group.key, onMoveSession, sortableSessionIds]
+    [
+      canReorderSessions,
+      group.key,
+      onMoveSession,
+      restoreSessionDragCollapse,
+      sortableIdsForNode,
+      visibleNodes,
+    ]
   );
   const toggleListLabel = whetherShowFullList
     ? t('sessions.showLess', 'Show less')
@@ -983,7 +1086,12 @@ const SessionGroupSection = memo(function SessionGroupSection({
       </div>
 
       {!group.collapsed && (
-        <SidebarSortableList ids={sortableSessionIds} onDragEnd={handleSessionDragEnd}>
+        <SidebarSortableList
+          ids={sortableSessionIds}
+          onDragStart={handleSessionDragStart}
+          onDragCancel={restoreSessionDragCollapse}
+          onDragEnd={handleSessionDragEnd}
+        >
           {visibleNodes.map((node) => {
             const session = node.item;
             const openerSessionId = normalizeSessionRowId(session.openedBySessionId);
@@ -1435,7 +1543,7 @@ const SessionGroupSection = memo(function SessionGroupSection({
                 </SwipeActionRow>
               );
 
-            const treeRow = (
+            const treeRow = (sessionDragHandle: ReactNode = null) => (
               <SessionOpenedByTreeRow
                 key={session.sessionId}
                 depth={node.depth}
@@ -1444,13 +1552,13 @@ const SessionGroupSection = memo(function SessionGroupSection({
                 {rowContent}
               </SessionOpenedByTreeRow>
             );
-            if (node.depth !== 0) return treeRow;
             return (
               <SortableSidebarOrderItem
                 key={session.sessionId}
                 id={session.sessionId}
-                disabled={!canReorderSessions}
+                disabled={!canReorderSessions || sortableIdsForNode(node).length < 2}
                 dragHandleLabel={dragHandleLabel}
+                sortGroup={node.depth === 0 ? 'root' : `child:${node.openedById}`}
               >
                 {treeRow}
               </SortableSidebarOrderItem>
@@ -1500,7 +1608,11 @@ const SortableRepoGroupSection = memo(function SortableRepoGroupSection({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: group.key, disabled: !canReorderRepos });
+  } = useSortable({
+    id: group.key,
+    disabled: !canReorderRepos,
+    data: { sidebarSortGroup: 'repositories' },
+  });
 
   const constrainedTransform = transform
     ? {
@@ -1566,6 +1678,7 @@ export const SessionList = memo(function SessionList({
   onSelectSession,
   onNavigateSessionTab,
   onToggleRepoCollapsed,
+  onSetRepoCollapsed,
   onToggleChatsCollapsed,
   onArchiveSession,
   onRenameSession,
@@ -1574,7 +1687,7 @@ export const SessionList = memo(function SessionList({
   onShareSessionWithTeam,
   onNew,
   onMoveRepo,
-  sessionOrderByGroupKey,
+  sessionOrderByGroupKey = {},
   onMoveSession,
   onOpenPullRequest,
   onNavigateToNewSession,
@@ -1622,6 +1735,10 @@ export const SessionList = memo(function SessionList({
     [groups]
   );
   const canReorderRepos = typeof onMoveRepo === 'function' && repoIds.length > 1;
+  const repoCollapseDragSnapshotRef = useRef<{
+    repoFullName: string;
+    collapsed: boolean;
+  } | null>(null);
   const repoStateByFullName = useMemo(() => {
     const map = new Map<string, SessionListRepoState>();
     for (const repo of repos) {
@@ -1667,26 +1784,47 @@ export const SessionList = memo(function SessionList({
     );
   }
 
+  const handleRepoDragStart = useCallback(
+    (event: DragStartEvent) => {
+      if (!canReorderRepos) return;
+      const repoFullName = String(event.active.id);
+      const repo = repoStateByFullName.get(repoFullName);
+      if (!repo) return;
+      repoCollapseDragSnapshotRef.current = { repoFullName, collapsed: repo.collapsed };
+      onSetRepoCollapsed?.(repoFullName, true);
+    },
+    [canReorderRepos, onSetRepoCollapsed, repoStateByFullName]
+  );
+  const restoreRepoCollapse = useCallback(() => {
+    const snapshot = repoCollapseDragSnapshotRef.current;
+    if (!snapshot) return;
+    repoCollapseDragSnapshotRef.current = null;
+    onSetRepoCollapsed?.(snapshot.repoFullName, snapshot.collapsed);
+  }, [onSetRepoCollapsed]);
   const handleDragEnd = (event: DragEndEvent) => {
-    if (!canReorderRepos) return;
-    const overId = event.over?.id;
-    if (!overId) return;
+    try {
+      if (!canReorderRepos) return;
+      const overId = event.over?.id;
+      if (!overId) return;
 
-    const activeRepoFullName = String(event.active.id);
-    const overRepoFullName = String(overId);
-    if (activeRepoFullName === overRepoFullName) return;
+      const activeRepoFullName = String(event.active.id);
+      const overRepoFullName = String(overId);
+      if (activeRepoFullName === overRepoFullName) return;
 
-    const fromIndex = repoIds.indexOf(activeRepoFullName);
-    const toIndex = repoIds.indexOf(overRepoFullName);
-    if (fromIndex < 0 || toIndex < 0) return;
+      const fromIndex = repoIds.indexOf(activeRepoFullName);
+      const toIndex = repoIds.indexOf(overRepoFullName);
+      if (fromIndex < 0 || toIndex < 0) return;
 
-    const nextRepoFullNames = arrayMove(repoIds, fromIndex, toIndex);
-    const nextRepos: SessionListRepoState[] = nextRepoFullNames.map((repoFullName) => {
-      const existing = repoStateByFullName.get(repoFullName);
-      return existing ?? { repoFullName, collapsed: false };
-    });
+      const nextRepoFullNames = arrayMove(repoIds, fromIndex, toIndex);
+      const nextRepos: SessionListRepoState[] = nextRepoFullNames.map((repoFullName) => {
+        const existing = repoStateByFullName.get(repoFullName);
+        return existing ?? { repoFullName, collapsed: false };
+      });
 
-    onMoveRepo?.({ activeRepoFullName, overRepoFullName, fromIndex, toIndex, nextRepos });
+      onMoveRepo?.({ activeRepoFullName, overRepoFullName, fromIndex, toIndex, nextRepos });
+    } finally {
+      restoreRepoCollapse();
+    }
   };
 
   if (!groups.length) {
@@ -1701,8 +1839,11 @@ export const SessionList = memo(function SessionList({
     <TooltipProvider>
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCenter}
+        collisionDetection={sidebarListCollisionDetection}
+        modifiers={[restrictSidebarListDrag]}
         autoScroll={false}
+        onDragStart={handleRepoDragStart}
+        onDragCancel={restoreRepoCollapse}
         onDragEnd={handleDragEnd}
       >
         <SortableContext items={repoIds} strategy={verticalListSortingStrategy}>
@@ -1734,6 +1875,7 @@ export const SessionList = memo(function SessionList({
                     onOpenPullRequest={onOpenPullRequest}
                     onToggleFullList={handleToggleFullList}
                     onMoveSession={onMoveSession}
+                    sessionOrderByGroupKey={sessionOrderByGroupKey}
                     dragHandleLabel={dragHandleLabel}
                     collapsedOpenedBySessionIds={collapsedOpenedBySessionIds}
                     onToggleOpenedBySessions={handleToggleOpenedBySessions}
@@ -1769,6 +1911,7 @@ export const SessionList = memo(function SessionList({
                   onOpenPullRequest={onOpenPullRequest}
                   onToggleFullList={handleToggleFullList}
                   onMoveSession={onMoveSession}
+                  sessionOrderByGroupKey={sessionOrderByGroupKey}
                   dragHandleLabel={dragHandleLabel}
                   collapsedOpenedBySessionIds={collapsedOpenedBySessionIds}
                   onToggleOpenedBySessions={handleToggleOpenedBySessions}

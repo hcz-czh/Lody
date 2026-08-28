@@ -1,5 +1,5 @@
 import type { SidebarNavItem } from '@/atoms/focus-layer';
-import type { SidebarOrganizeMode } from '@/atoms/sidebar-state';
+import { reconcileVisibleSidebarOrder, type SidebarOrganizeMode } from '@/atoms/sidebar-state';
 import {
   buildGroups,
   getVisibleSessionGroupRows,
@@ -65,13 +65,19 @@ function emitSessionGroup(
   items: SidebarNavItem[],
   group: SessionRowGroup,
   showFullSessionGroups: Record<string, boolean>,
-  collapsedOpenedBySessions: Record<string, boolean>
+  collapsedOpenedBySessions: Record<string, boolean>,
+  sessionOrderByGroupKey: Readonly<Record<string, readonly string[]>>
 ): void {
   items.push({ kind: 'group-header', groupKey: group.key, collapsed: group.collapsed });
   if (group.collapsed) return;
 
   const showFull = showFullSessionGroups[group.key] ?? false;
-  for (const session of getVisibleSessionGroupRows(group, showFull, collapsedOpenedBySessions)) {
+  for (const session of getVisibleSessionGroupRows(
+    group,
+    showFull,
+    collapsedOpenedBySessions,
+    sessionOrderByGroupKey
+  )) {
     items.push({ kind: 'session', sessionId: session.sessionId, groupKey: group.key });
   }
 
@@ -83,7 +89,8 @@ function emitSessionGroup(
 function emitLocalSections(
   items: SidebarNavItem[],
   sections: SidebarNavigationLocalSection[],
-  collapsedOpenedBySessions: Record<string, boolean>
+  collapsedOpenedBySessions: Record<string, boolean>,
+  sessionOrderByGroupKey: Readonly<Record<string, readonly string[]>>
 ): void {
   for (const section of sections) {
     if (section.collapsed) continue;
@@ -102,6 +109,18 @@ function emitLocalSections(
         getId: (session) => session.id,
         getOpenedBySessionId: (session) => session.openedByRowSessionId ?? null,
         isCollapsed: (openerId) => collapsedOpenedBySessions[openerId] === true,
+        childOrder: (openerId, children) => {
+          const savedIds = sessionOrderByGroupKey[`${projectKey}:children:${openerId}`];
+          if (!savedIds) return children;
+          const byId = new Map(children.map((session) => [session.id, session]));
+          return reconcileVisibleSidebarOrder(
+            savedIds,
+            children.map((session) => session.id)
+          ).flatMap((id) => {
+            const session = byId.get(id);
+            return session ? [session] : [];
+          });
+        },
         ...(project.manualSessionOrder
           ? {}
           : { rootRank: (session: (typeof project.sessions)[number]) => session.rootRankMs ?? 0 }),
@@ -151,7 +170,13 @@ export function buildSidebarNavigationItems({
     return items;
   }
 
-  emitLocalSections(items, workspace.localSections, collapsedOpenedBySessions);
+  const sessionOrderByGroupKey = workspace.sessionOrderByGroupKey ?? {};
+  emitLocalSections(
+    items,
+    workspace.localSections,
+    collapsedOpenedBySessions,
+    sessionOrderByGroupKey
+  );
 
   if (!workspace.githubSectionCollapsed) {
     for (const group of buildGroups(
@@ -161,7 +186,13 @@ export function buildSidebarNavigationItems({
       'Chats',
       workspace.sessionOrderByGroupKey
     )) {
-      emitSessionGroup(items, group, showFullSessionGroups, collapsedOpenedBySessions);
+      emitSessionGroup(
+        items,
+        group,
+        showFullSessionGroups,
+        collapsedOpenedBySessions,
+        sessionOrderByGroupKey
+      );
     }
   }
 
@@ -172,7 +203,13 @@ export function buildSidebarNavigationItems({
     'Chats',
     workspace.sessionOrderByGroupKey
   )) {
-    emitSessionGroup(items, group, showFullSessionGroups, collapsedOpenedBySessions);
+    emitSessionGroup(
+      items,
+      group,
+      showFullSessionGroups,
+      collapsedOpenedBySessions,
+      sessionOrderByGroupKey
+    );
   }
 
   return items;

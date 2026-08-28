@@ -204,6 +204,20 @@ describe('buildOpenedBySessionTree rootRank', () => {
 
     expect(buildRanked(rows)).toEqual(['root@0', 'first@1', 'second@1']);
   });
+
+  test('childOrder can reorder siblings without changing roots', () => {
+    const rows: Row[] = [
+      { id: 'root' },
+      { id: 'first', openedBy: 'root' },
+      { id: 'second', openedBy: 'root' },
+      { id: 'other' },
+    ];
+    const nodes = buildOpenedBySessionTree(rows, {
+      ...accessors,
+      childOrder: (_openerId, children) => [...children].reverse(),
+    });
+    expect(nodes.map((node) => node.id)).toEqual(['root', 'second', 'first', 'other']);
+  });
 });
 
 describe('countOpenedByTreeRoots', () => {

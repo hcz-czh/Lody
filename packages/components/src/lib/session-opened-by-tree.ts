@@ -74,6 +74,8 @@ export type BuildOpenedBySessionTreeOptions<T> = {
    * preview never splits an opener from the Sessions it opened.
    */
   maxRoots?: number;
+  /** Optional ordering for the children rendered below each opener. */
+  childOrder?: (openerId: string, children: readonly T[]) => readonly T[];
 };
 
 /**
@@ -159,7 +161,7 @@ export function buildOpenedBySessionTree<T>(
   items: readonly T[],
   options: BuildOpenedBySessionTreeOptions<T>
 ): OpenedBySessionTreeNode<T>[] {
-  const { getId, getOpenedBySessionId, isCollapsed, rootRank, maxRoots } = options;
+  const { getId, getOpenedBySessionId, isCollapsed, rootRank, maxRoots, childOrder } = options;
   if (items.length === 0) return [];
 
   const openerById = resolve(items, getId, getOpenedBySessionId);
@@ -203,7 +205,9 @@ export function buildOpenedBySessionTree<T>(
   const nodes: OpenedBySessionTreeNode<T>[] = [];
   for (const root of visibleRoots) {
     const rootId = getId(root);
-    const children = childrenByOpener.get(rootId) ?? [];
+    const children = childOrder
+      ? childOrder(rootId, childrenByOpener.get(rootId) ?? [])
+      : (childrenByOpener.get(rootId) ?? []);
     const expanded = children.length === 0 || !isCollapsed?.(rootId);
     nodes.push({
       item: root,
