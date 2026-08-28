@@ -2389,6 +2389,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
       <DndContext
         sensors={sidebarOrderSensors}
         collisionDetection={closestCenter}
+        autoScroll={false}
         onDragEnd={handleRemoteSectionDragEnd}
       >
         <SortableContext items={remoteSectionIds} strategy={verticalListSortingStrategy}>
@@ -2453,6 +2454,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
                         sensors={sidebarOrderSensors}
                         collisionDetection={closestCenter}
                         modifiers={[restrictSidebarListDrag]}
+                        autoScroll={false}
                         onDragStart={(event) =>
                           handleProjectDragStart(section.machineId!, projectIds, event)
                         }

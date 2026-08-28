@@ -1115,6 +1115,7 @@ function DemoProjectSection({
           sensors={sensors}
           collisionDetection={closestCenter}
           modifiers={[restrictSidebarListDrag]}
+          autoScroll={false}
           onDragStart={handleDragStart}
           onDragCancel={onFinishProjectDrag}
           onDragEnd={handleDragEnd}
@@ -1339,6 +1340,7 @@ function ProductionLikeTopContent({
       <DndContext
         sensors={machineSensors}
         collisionDetection={closestCenter}
+        autoScroll={false}
         onDragEnd={handleMachineDragEnd}
       >
         <SortableContext items={remoteMachineIds} strategy={verticalListSortingStrategy}>

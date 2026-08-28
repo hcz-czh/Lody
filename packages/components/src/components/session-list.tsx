@@ -655,6 +655,7 @@ export function SidebarSortableList({
       sensors={sensors}
       collisionDetection={closestCenter}
       modifiers={[restrictSidebarListDrag]}
+      autoScroll={false}
       onDragEnd={onDragEnd}
     >
       <SortableContext items={[...ids]} strategy={verticalListSortingStrategy}>
@@ -1698,7 +1699,12 @@ export const SessionList = memo(function SessionList({
 
   return (
     <TooltipProvider>
-      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        autoScroll={false}
+        onDragEnd={handleDragEnd}
+      >
         <SortableContext items={repoIds} strategy={verticalListSortingStrategy}>
           <div className={cn('flex flex-col', className)}>
             {groups.map((group, groupIndex) => {
