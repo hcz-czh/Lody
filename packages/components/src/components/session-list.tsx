@@ -3,6 +3,7 @@ import {
   closestCenter,
   DndContext,
   type DragEndEvent,
+  type Modifier,
   KeyboardSensor,
   PointerSensor,
   useSensor,
@@ -614,6 +615,27 @@ export function SortableSidebarOrderItem({
     </div>
   );
 }
+
+export const restrictSidebarProjectDrag: Modifier = ({
+  transform,
+  activeNodeRect,
+  containerNodeRect,
+}) => {
+  const constrainedTransform = {
+    ...transform,
+    x: 0,
+    scaleX: 1,
+    scaleY: 1,
+  };
+  if (!activeNodeRect || !containerNodeRect) return constrainedTransform;
+
+  const minY = containerNodeRect.top - activeNodeRect.top;
+  const maxY = Math.max(minY, containerNodeRect.bottom - activeNodeRect.bottom);
+  return {
+    ...constrainedTransform,
+    y: Math.min(Math.max(transform.y, minY), maxY),
+  };
+};
 
 export function SidebarSortableList({
   ids,

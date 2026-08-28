@@ -27,7 +27,11 @@ import { LoroSidebar } from '@/components/loro-sidebar';
 import { LocalProjectItem } from '@/components/loro-app-sidebar';
 import { SidebarSectionHeader } from '@/components/sidebar-row-shared';
 import { buildSidebarOpenerRowResolver } from '@/components/sessions/session-list-rows';
-import { SessionList, SortableSidebarOrderItem } from '@/components/session-list';
+import {
+  restrictSidebarProjectDrag,
+  SessionList,
+  SortableSidebarOrderItem,
+} from '@/components/session-list';
 import type { SessionListProps } from '@/components/session-list';
 import type {
   SessionListRepoMove,
@@ -1034,7 +1038,8 @@ function DemoProjectSection({
   machineDragHandle,
   collapsedProjects,
   onToggleCollapsed,
-  onCollapseProject,
+  onStartProjectDrag,
+  onFinishProjectDrag,
   onToggleProjectCollapsed,
   onProjectsChange,
   sessionsByProjectKey,
@@ -1050,7 +1055,8 @@ function DemoProjectSection({
   machineDragHandle?: ReactNode;
   collapsedProjects: Record<string, boolean>;
   onToggleCollapsed: () => void;
-  onCollapseProject: (projectKey: string) => void;
+  onStartProjectDrag: (machineId: MachineId, projectIds: readonly string[]) => void;
+  onFinishProjectDrag: () => void;
   onToggleProjectCollapsed: (projectKey: string) => void;
   onProjectsChange: (projects: LocalProjectMeta[]) => void;
   sessionsByProjectKey: Record<string, SessionMeta[]>;
@@ -1066,15 +1072,20 @@ function DemoProjectSection({
   const handleDragStart = (event: DragStartEvent) => {
     const projectId = String(event.active.id);
     if (!projectIds.includes(projectId)) return;
-    onCollapseProject(`${machineId}:${projectId}`);
+    onStartProjectDrag(machineId, projectIds);
   };
   const handleDragEnd = (event: DragEndEvent) => {
-    const overId = event.over?.id;
-    if (!overId) return;
     const fromIndex = projectIds.indexOf(String(event.active.id));
-    const toIndex = projectIds.indexOf(String(overId));
-    if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
-    onProjectsChange(arrayMove(projects, fromIndex, toIndex));
+    try {
+      if (fromIndex < 0) return;
+      const overId = event.over?.id;
+      if (!overId) return;
+      const toIndex = projectIds.indexOf(String(overId));
+      if (toIndex < 0 || fromIndex === toIndex) return;
+      onProjectsChange(arrayMove(projects, fromIndex, toIndex));
+    } finally {
+      onFinishProjectDrag();
+    }
   };
 
   return (
@@ -1103,7 +1114,9 @@ function DemoProjectSection({
         <DndContext
           sensors={sensors}
           collisionDetection={closestCenter}
+          modifiers={[restrictSidebarProjectDrag]}
           onDragStart={handleDragStart}
+          onDragCancel={onFinishProjectDrag}
           onDragEnd={handleDragEnd}
         >
           <SortableContext items={projectIds} strategy={verticalListSortingStrategy}>
@@ -1221,6 +1234,7 @@ function ProductionLikeTopContent({
   );
   const [collapsedProjects, setCollapsedProjects] =
     useState<Record<string, boolean>>(projectCollapseStates);
+  const projectCollapseDragSnapshotRef = useRef<Record<string, boolean | undefined> | null>(null);
   const machineSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
@@ -1234,10 +1248,32 @@ function ProductionLikeTopContent({
     if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
     setRemoteProjectSections((sections) => arrayMove(sections, fromIndex, toIndex));
   };
-  const collapseProject = (projectKey: string) =>
-    setCollapsedProjects((prev) =>
-      prev[projectKey] === true ? prev : { ...prev, [projectKey]: true }
-    );
+  const startProjectDrag = (machineId: MachineId, projectIds: readonly string[]) => {
+    const previousState: Record<string, boolean | undefined> = {};
+    for (const id of projectIds) {
+      const key = `${machineId}:${id}`;
+      previousState[key] = collapsedProjects[key];
+    }
+    projectCollapseDragSnapshotRef.current = previousState;
+    setCollapsedProjects((prev) => {
+      const next = { ...prev };
+      for (const id of projectIds) next[`${machineId}:${id}`] = true;
+      return next;
+    });
+  };
+  const finishProjectDrag = () => {
+    const previousState = projectCollapseDragSnapshotRef.current;
+    if (!previousState) return;
+    projectCollapseDragSnapshotRef.current = null;
+    setCollapsedProjects((prev) => {
+      const next = { ...prev };
+      for (const [key, collapsed] of Object.entries(previousState)) {
+        if (collapsed === undefined) delete next[key];
+        else next[key] = collapsed;
+      }
+      return next;
+    });
+  };
   const toggleProjectCollapsed = (projectKey: string) =>
     setCollapsedProjects((prev) => ({ ...prev, [projectKey]: !(prev[projectKey] ?? false) }));
   const toggleSectionCollapsed = (sectionKey: string) =>
@@ -1291,7 +1327,8 @@ function ProductionLikeTopContent({
         collapsed={collapsedSections[demoMachineId] ?? false}
         collapsedProjects={collapsedProjects}
         onToggleCollapsed={() => toggleSectionCollapsed(demoMachineId)}
-        onCollapseProject={collapseProject}
+        onStartProjectDrag={startProjectDrag}
+        onFinishProjectDrag={finishProjectDrag}
         onToggleProjectCollapsed={toggleProjectCollapsed}
         onProjectsChange={setLocalProjects}
         sessionsByProjectKey={projectSessionsByKey}
@@ -1322,7 +1359,8 @@ function ProductionLikeTopContent({
                   machineDragHandle={machineDragHandle}
                   collapsedProjects={collapsedProjects}
                   onToggleCollapsed={() => toggleSectionCollapsed(section.machineId)}
-                  onCollapseProject={collapseProject}
+                  onStartProjectDrag={startProjectDrag}
+                  onFinishProjectDrag={finishProjectDrag}
                   onToggleProjectCollapsed={toggleProjectCollapsed}
                   onProjectsChange={(projects) =>
                     setRemoteProjectSections((sections) =>

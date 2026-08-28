@@ -138,6 +138,7 @@ import {
   SidebarSortableList,
   shallowEqualExceptKeys,
   SortableSidebarOrderItem,
+  restrictSidebarProjectDrag,
   type SessionListPullRequestOpen,
   type SessionListRepoMove,
   type SessionListRepoState,
@@ -1757,6 +1758,7 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
   const [localProjectCollapseState, setLocalProjectCollapseState] = useAtom(
     localProjectCollapseStateAtom
   );
+  const projectCollapseDragSnapshotRef = useRef<Record<string, boolean | undefined> | null>(null);
   // Shared with SessionList (same atom) so an opener collapsed in one sidebar
   // surface stays collapsed in the other, and with the keyboard nav model so
   // arrow keys never visit a hidden row.
@@ -2300,37 +2302,66 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
       const projectId = String(event.active.id);
       if (!projectIds.includes(projectId)) return;
 
-      const projectKey = `${machineId}:${projectId}`;
-      setLocalProjectCollapseState((prev) =>
-        prev[projectKey] === true ? prev : { ...prev, [projectKey]: true }
-      );
+      const previousState: Record<string, boolean | undefined> = {};
+      for (const id of projectIds) {
+        const key = `${machineId}:${id}`;
+        previousState[key] = localProjectCollapseState[key];
+      }
+      projectCollapseDragSnapshotRef.current = previousState;
+      setLocalProjectCollapseState((prev) => {
+        const next = { ...prev };
+        for (const id of projectIds) next[`${machineId}:${id}`] = true;
+        return next;
+      });
     },
-    [setLocalProjectCollapseState]
+    [localProjectCollapseState, setLocalProjectCollapseState]
   );
+  const restoreProjectCollapseState = useCallback(() => {
+    const previousState = projectCollapseDragSnapshotRef.current;
+    if (!previousState) return;
+    projectCollapseDragSnapshotRef.current = null;
+    setLocalProjectCollapseState((prev) => {
+      const next = { ...prev };
+      for (const [key, collapsed] of Object.entries(previousState)) {
+        if (collapsed === undefined) delete next[key];
+        else next[key] = collapsed;
+      }
+      return next;
+    });
+  }, [setLocalProjectCollapseState]);
+  const handleProjectDragCancel = useCallback(() => {
+    restoreProjectCollapseState();
+  }, [restoreProjectCollapseState]);
   const handleProjectDragEnd = useCallback(
     (machineId: MachineId, projectIds: readonly string[], event: DragEndEvent) => {
-      const overId = event.over?.id;
-      if (!overId) return;
       const fromIndex = projectIds.indexOf(String(event.active.id));
-      const toIndex = projectIds.indexOf(String(overId));
-      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
 
-      const current = localProjectSidebarOrderRef.current;
-      const savedProjectIds = current.projectIdsByMachineId[machineId] ?? [];
-      const next = {
-        ...current,
-        projectIdsByMachineId: {
-          ...current.projectIdsByMachineId,
-          [machineId]: mergeVisibleSidebarOrder(
-            savedProjectIds,
-            arrayMove([...projectIds], fromIndex, toIndex)
-          ),
-        },
-      };
-      localProjectSidebarOrderRef.current = next;
-      setLocalProjectSidebarOrder(next);
+      try {
+        if (fromIndex < 0) return;
+        const overId = event.over?.id;
+        if (!overId) return;
+        const toIndex = projectIds.indexOf(String(overId));
+        if (toIndex < 0 || fromIndex === toIndex) return;
+
+        const current = localProjectSidebarOrderRef.current;
+        const savedProjectIds = current.projectIdsByMachineId[machineId] ?? [];
+        const next = {
+          ...current,
+          projectIdsByMachineId: {
+            ...current.projectIdsByMachineId,
+            [machineId]: mergeVisibleSidebarOrder(
+              savedProjectIds,
+              arrayMove([...projectIds], fromIndex, toIndex)
+            ),
+          },
+        };
+        localProjectSidebarOrderRef.current = next;
+        setLocalProjectSidebarOrder(next);
+      } finally {
+        restoreProjectCollapseState();
+      }
     },
-    [setLocalProjectSidebarOrder]
+    [restoreProjectCollapseState, setLocalProjectSidebarOrder]
   );
 
   const showChats = sessionsListLoading || workspaceChatSessions.length > 0;
@@ -2421,9 +2452,11 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
                       <DndContext
                         sensors={sidebarOrderSensors}
                         collisionDetection={closestCenter}
+                        modifiers={[restrictSidebarProjectDrag]}
                         onDragStart={(event) =>
                           handleProjectDragStart(section.machineId!, projectIds, event)
                         }
+                        onDragCancel={handleProjectDragCancel}
                         onDragEnd={(event) =>
                           handleProjectDragEnd(section.machineId!, projectIds, event)
                         }
