@@ -12,3 +12,10 @@ Parent `AGENTS.md` files also apply.
   and the mobile workspace stack do not start early. The workspace identity's
   syncing state follows that same scoped readiness, not the coarser connection
   state; an online transport does not imply that workspace data is ready.
+
+## Sidebar ordering
+
+- Repository, per-machine project, and remote-machine order are per-workspace
+  client preferences, never shared workspace data. Keep the local-machine
+  section first and never move a project across machines. Sort listeners belong
+  only on the right-side handle so Session mention drags remain independent.

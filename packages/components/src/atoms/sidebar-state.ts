@@ -119,6 +119,82 @@ export const repoOrderAtom = atom<readonly string[], [readonly string[]], void>(
   }
 );
 
+export type LocalProjectSidebarOrder = {
+  remoteMachineIds: readonly string[];
+  projectIdsByMachineId: Readonly<Record<string, readonly string[]>>;
+};
+
+const EMPTY_LOCAL_PROJECT_SIDEBAR_ORDER: LocalProjectSidebarOrder = Object.freeze({
+  remoteMachineIds: Object.freeze([]),
+  projectIdsByMachineId: Object.freeze({}),
+});
+
+const localProjectSidebarOrderByWorkspaceAtom = atomWithStorage<
+  Record<string, LocalProjectSidebarOrder>
+>('lody-sidebar-local-project-order-by-workspace', {});
+
+/**
+ * Local/remote project ordering is a per-client preference. It intentionally
+ * stays out of the shared workspace document and cloud APIs.
+ */
+export const localProjectSidebarOrderAtom = atom<
+  LocalProjectSidebarOrder,
+  [LocalProjectSidebarOrder],
+  void
+>(
+  (get) => {
+    const workspaceId = get(currentWorkspaceIdAtom);
+    if (!workspaceId) return EMPTY_LOCAL_PROJECT_SIDEBAR_ORDER;
+    return (
+      get(localProjectSidebarOrderByWorkspaceAtom)[workspaceId] ?? EMPTY_LOCAL_PROJECT_SIDEBAR_ORDER
+    );
+  },
+  (get, set, value) => {
+    const workspaceId = get(currentWorkspaceIdAtom);
+    if (!workspaceId) return;
+    const map = get(localProjectSidebarOrderByWorkspaceAtom);
+    set(localProjectSidebarOrderByWorkspaceAtom, {
+      ...map,
+      [workspaceId]: {
+        remoteMachineIds: [...value.remoteMachineIds],
+        projectIdsByMachineId: Object.fromEntries(
+          Object.entries(value.projectIdsByMachineId).map(([machineId, projectIds]) => [
+            machineId,
+            [...projectIds],
+          ])
+        ),
+      },
+    });
+  }
+);
+
+/** Apply saved positions to visible ids, then append newly discovered ids. */
+export function reconcileVisibleSidebarOrder(
+  savedIds: readonly string[],
+  visibleIds: readonly string[]
+): string[] {
+  const visible = new Set(visibleIds);
+  const seen = new Set<string>();
+  return [...savedIds, ...visibleIds].filter((id) => {
+    if (!visible.has(id) || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+/** Persist a visible reorder without forgetting ids hidden by a transient view. */
+export function mergeVisibleSidebarOrder(
+  savedIds: readonly string[],
+  visibleIds: readonly string[]
+): string[] {
+  const seen = new Set<string>();
+  return [...visibleIds, ...savedIds].filter((id) => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
 /**
  * Update repo collapse state for a specific repo
  */

@@ -1,5 +1,20 @@
 import type { Meta, StoryObj } from '@storybook/react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  sortableKeyboardCoordinates,
+  SortableContext,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { FolderPlus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type {
@@ -8,7 +23,7 @@ import type {
   LoroSidebarOrganizeMode,
 } from '@/components/loro-sidebar';
 import { LoroSidebar } from '@/components/loro-sidebar';
-import { LocalProjectItem } from '@/components/loro-app-sidebar';
+import { LocalProjectItem, SortableSidebarOrderItem } from '@/components/loro-app-sidebar';
 import { SidebarSectionHeader } from '@/components/sidebar-row-shared';
 import { buildSidebarOpenerRowResolver } from '@/components/sessions/session-list-rows';
 import { SessionList } from '@/components/session-list';
@@ -828,6 +843,51 @@ const demoProjects: LocalProjectMeta[] = [
   },
 ];
 
+type DemoRemoteProjectSection = {
+  machineId: MachineId;
+  machineName: string;
+  projects: LocalProjectMeta[];
+};
+
+const demoRemoteProjectSections: DemoRemoteProjectSection[] = [
+  {
+    machineId: 'machine-remote-mac' as MachineId,
+    machineName: 'MacBook Pro',
+    projects: [
+      {
+        id: 'proj-conductor' as LocalProjectId,
+        name: 'conductor',
+        rootPath: '/Users/developer/Code/conductor',
+        createdAtMs: NOW - 20 * 24 * 60 * 60 * 1000,
+      },
+      {
+        id: 'proj-docs' as LocalProjectId,
+        name: 'docs',
+        rootPath: '/Users/developer/Code/docs',
+        createdAtMs: NOW - 10 * 24 * 60 * 60 * 1000,
+      },
+    ],
+  },
+  {
+    machineId: 'machine-remote-linux' as MachineId,
+    machineName: 'Linux workstation',
+    projects: [
+      {
+        id: 'proj-flock' as LocalProjectId,
+        name: 'flock',
+        rootPath: '/home/developer/Code/flock',
+        createdAtMs: NOW - 40 * 24 * 60 * 60 * 1000,
+      },
+      {
+        id: 'proj-streams' as LocalProjectId,
+        name: 'loro-streams',
+        rootPath: '/home/developer/Code/loro-streams',
+        createdAtMs: NOW - 5 * 24 * 60 * 60 * 1000,
+      },
+    ],
+  },
+];
+
 // A couple of local-project sessions so the single-line local row is exercised:
 // one running inside a worktree (shows the FolderTree mode icon) and one plain
 // local session (no mode icon). Live status is empty in the story, so the leading
@@ -922,6 +982,128 @@ const demoResolveOpenerRowId = buildSidebarOpenerRowResolver([
   demoChildTabSession,
 ]);
 
+function DemoProjectSection({
+  machineId,
+  machineName,
+  label,
+  projects,
+  isLocal = false,
+  collapsed,
+  machineDragHandle,
+  collapsedProjects,
+  onToggleCollapsed,
+  onToggleProjectCollapsed,
+  onProjectsChange,
+}: {
+  machineId: MachineId;
+  machineName: string;
+  label: string;
+  projects: LocalProjectMeta[];
+  isLocal?: boolean;
+  collapsed: boolean;
+  machineDragHandle?: ReactNode;
+  collapsedProjects: Record<string, boolean>;
+  onToggleCollapsed: () => void;
+  onToggleProjectCollapsed: (projectKey: string) => void;
+  onProjectsChange: (projects: LocalProjectMeta[]) => void;
+}) {
+  const isMobile = useIsMobile();
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
+  const projectIds = projects.map((project) => String(project.id));
+  const handleDragEnd = (event: DragEndEvent) => {
+    const overId = event.over?.id;
+    if (!overId) return;
+    const fromIndex = projectIds.indexOf(String(event.active.id));
+    const toIndex = projectIds.indexOf(String(overId));
+    if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
+    onProjectsChange(arrayMove(projects, fromIndex, toIndex));
+  };
+
+  return (
+    <div className={cn('space-y-0.5', collapsed ? 'mb-1' : 'mb-3')}>
+      <SidebarSectionHeader
+        label={label}
+        collapsed={collapsed}
+        isMobile={isMobile}
+        toggleLabel="Toggle"
+        onToggleCollapsed={onToggleCollapsed}
+        action={
+          isLocal ? (
+            <button
+              type="button"
+              className="inline-flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground/80 hover:bg-muted/30 hover:text-foreground"
+              aria-label="Import local project folder"
+            >
+              <FolderPlus className="h-4 w-4" />
+            </button>
+          ) : (
+            machineDragHandle
+          )
+        }
+      />
+      {collapsed ? null : (
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext items={projectIds} strategy={verticalListSortingStrategy}>
+            <div className="space-y-1">
+              {projects.map((project) => {
+                const projectKey = `${machineId}:${project.id}`;
+                return (
+                  <SortableSidebarOrderItem
+                    key={project.id}
+                    id={String(project.id)}
+                    disabled={projectIds.length < 2}
+                    dragHandleLabel="Drag to reorder"
+                  >
+                    {(dragHandle) => (
+                      <LocalProjectItem
+                        machineId={machineId}
+                        machineName={machineName}
+                        project={project}
+                        canRemoveProject
+                        canNavigateProject
+                        collapsed={collapsedProjects[projectKey] ?? false}
+                        isSelected={false}
+                        sessionsForProject={
+                          isLocal && project.id === ('proj-lody' as LocalProjectId)
+                            ? demoLocalSessions
+                            : []
+                        }
+                        childSessionsByParent={new Map()}
+                        liveSessionStatuses={EMPTY_LIVE_SESSION_STATUSES}
+                        formattedPath={project.rootPath}
+                        defaultSessionTitle="Untitled"
+                        selectedSessionId={null}
+                        removeProjectLabel="Remove folder"
+                        archiveTooltipLabel="Archive"
+                        archiveActionLabel="Archive"
+                        archiveConfirmLabel="Confirm"
+                        isMobile={isMobile}
+                        toggleLabel="Toggle"
+                        dragHandle={dragHandle}
+                        onNavigateProject={() => {}}
+                        onNavigateSession={() => {}}
+                        onArchive={() => {}}
+                        collapsedOpenedBySessionIds={{}}
+                        onToggleOpenedBySessions={() => {}}
+                        resolveOpenerRowId={demoResolveOpenerRowId}
+                        onToggleCollapsed={() => onToggleProjectCollapsed(projectKey)}
+                        onRequestRemoval={() => {}}
+                      />
+                    )}
+                  </SortableSidebarOrderItem>
+                );
+              })}
+            </div>
+          </SortableContext>
+        </DndContext>
+      )}
+    </div>
+  );
+}
+
 function ProductionLikeTopContent({
   chatSessions,
   githubWorktreeCount,
@@ -942,22 +1124,41 @@ function ProductionLikeTopContent({
   onToggleChatsCollapsed: () => void;
 }) {
   const isMobile = useIsMobile();
-  const [localProjectsCollapsed, setLocalProjectsCollapsed] = useState(false);
   const [githubCollapsed, setGithubCollapsed] = useState(false);
+  const [localProjects, setLocalProjects] = useState(demoProjects);
+  const [remoteProjectSections, setRemoteProjectSections] = useState(demoRemoteProjectSections);
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const projectCollapseStates = useMemo(
-    () => Object.fromEntries(demoProjects.map((p) => [`${demoMachineId}:${p.id}`, true])),
+    () =>
+      Object.fromEntries(
+        [
+          ...demoProjects.map((project) => [demoMachineId, project] as const),
+          ...demoRemoteProjectSections.flatMap((section) =>
+            section.projects.map((project) => [section.machineId, project] as const)
+          ),
+        ].map(([machineId, project]) => [`${machineId}:${project.id}`, true])
+      ),
     []
   );
   const [collapsedProjects, setCollapsedProjects] =
     useState<Record<string, boolean>>(projectCollapseStates);
-  const [collapsedOpenedBySessionIds, setCollapsedOpenedBySessionIds] = useState<
-    Record<string, boolean>
-  >({});
-  const toggleOpenedBySessions = (openerSessionId: string) =>
-    setCollapsedOpenedBySessionIds((prev) => ({
-      ...prev,
-      [openerSessionId]: !prev[openerSessionId],
-    }));
+  const machineSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
+  const remoteMachineIds = remoteProjectSections.map((section) => String(section.machineId));
+  const handleMachineDragEnd = (event: DragEndEvent) => {
+    const overId = event.over?.id;
+    if (!overId) return;
+    const fromIndex = remoteMachineIds.indexOf(String(event.active.id));
+    const toIndex = remoteMachineIds.indexOf(String(overId));
+    if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
+    setRemoteProjectSections((sections) => arrayMove(sections, fromIndex, toIndex));
+  };
+  const toggleProjectCollapsed = (projectKey: string) =>
+    setCollapsedProjects((prev) => ({ ...prev, [projectKey]: !(prev[projectKey] ?? false) }));
+  const toggleSectionCollapsed = (sectionKey: string) =>
+    setCollapsedSections((prev) => ({ ...prev, [sectionKey]: !(prev[sectionKey] ?? false) }));
 
   return (
     // Mirrors LoroAppSidebar's sidebarTopContent: sections carry their own
@@ -977,123 +1178,56 @@ function ProductionLikeTopContent({
         />
       ) : null}
 
-      <div>
-        <div className={cn('space-y-0.5', localProjectsCollapsed ? 'mb-1' : 'mb-3')}>
-          <SidebarSectionHeader
-            label="Local Projects"
-            collapsed={localProjectsCollapsed}
-            count={demoProjects.length}
-            isMobile={isMobile}
-            toggleLabel="Toggle"
-            onToggleCollapsed={() => setLocalProjectsCollapsed((v) => !v)}
-            action={
-              <button
-                type="button"
-                className="inline-flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground/80 hover:bg-muted/30 hover:text-foreground"
-                aria-label="Import local project folder"
-              >
-                <FolderPlus className="h-4 w-4" />
-              </button>
-            }
-          />
-          {localProjectsCollapsed ? null : (
-            <div className="space-y-1">
-              {demoProjects.map((project) => {
-                const key = `${demoMachineId}:${project.id}`;
-                const collapsed = collapsedProjects[key] ?? false;
-                return (
-                  <LocalProjectItem
-                    key={project.id}
-                    machineId={demoMachineId}
-                    machineName="Mac Studio"
-                    project={project}
-                    canRemoveProject
-                    canNavigateProject
-                    collapsed={collapsed}
-                    isSelected={false}
-                    sessionsForProject={
-                      project.id === ('proj-lody' as LocalProjectId) ? demoLocalSessions : []
-                    }
-                    childSessionsByParent={new Map()}
-                    liveSessionStatuses={EMPTY_LIVE_SESSION_STATUSES}
-                    formattedPath={project.rootPath}
-                    defaultSessionTitle="Untitled"
-                    selectedSessionId={null}
-                    removeProjectLabel="Remove folder"
-                    archiveTooltipLabel="Archive"
-                    archiveActionLabel="Archive"
-                    archiveConfirmLabel="Confirm"
-                    isMobile={isMobile}
-                    toggleLabel="Toggle"
-                    onNavigateProject={() => {}}
-                    onNavigateSession={() => {}}
-                    onArchive={() => {}}
-                    collapsedOpenedBySessionIds={collapsedOpenedBySessionIds}
-                    onToggleOpenedBySessions={toggleOpenedBySessions}
-                    resolveOpenerRowId={demoResolveOpenerRowId}
-                    onToggleCollapsed={() =>
-                      setCollapsedProjects((prev) => ({ ...prev, [key]: !(prev[key] ?? false) }))
-                    }
-                    onRequestRemoval={() => {}}
-                  />
-                );
-              })}
-            </div>
-          )}
-        </div>
+      <DemoProjectSection
+        machineId={demoMachineId}
+        machineName="Mac Studio"
+        label="Local Projects"
+        projects={localProjects}
+        isLocal
+        collapsed={collapsedSections[demoMachineId] ?? false}
+        collapsedProjects={collapsedProjects}
+        onToggleCollapsed={() => toggleSectionCollapsed(demoMachineId)}
+        onToggleProjectCollapsed={toggleProjectCollapsed}
+        onProjectsChange={setLocalProjects}
+      />
 
-        <div className="mb-3 space-y-0.5">
-          <SidebarSectionHeader
-            label="MacBook Pro projects"
-            collapsed={false}
-            count={1}
-            isMobile={isMobile}
-            toggleLabel="Toggle"
-            onToggleCollapsed={() => {}}
-          />
-          <div className="space-y-1">
-            {demoProjects.slice(0, 1).map((project) => {
-              const remoteMachineId = 'machine-remote' as MachineId;
-              const key = `${remoteMachineId}:${project.id}`;
-              const collapsed = collapsedProjects[key] ?? false;
-              return (
-                <LocalProjectItem
-                  key={`remote-${project.id}`}
-                  machineId={remoteMachineId}
-                  machineName="MacBook Pro"
-                  project={project}
-                  canRemoveProject
-                  canNavigateProject
-                  collapsed={collapsed}
-                  isSelected={false}
-                  sessionsForProject={[] as SessionMeta[]}
-                  childSessionsByParent={new Map()}
-                  liveSessionStatuses={EMPTY_LIVE_SESSION_STATUSES}
-                  formattedPath={project.rootPath}
-                  defaultSessionTitle="Untitled"
-                  selectedSessionId={null}
-                  removeProjectLabel="Remove folder"
-                  archiveTooltipLabel="Archive"
-                  archiveActionLabel="Archive"
-                  archiveConfirmLabel="Confirm"
-                  isMobile={isMobile}
-                  toggleLabel="Toggle"
-                  onNavigateProject={() => {}}
-                  onNavigateSession={() => {}}
-                  onArchive={() => {}}
-                  collapsedOpenedBySessionIds={collapsedOpenedBySessionIds}
-                  onToggleOpenedBySessions={toggleOpenedBySessions}
-                  resolveOpenerRowId={demoResolveOpenerRowId}
-                  onToggleCollapsed={() =>
-                    setCollapsedProjects((prev) => ({ ...prev, [key]: !(prev[key] ?? false) }))
+      <DndContext
+        sensors={machineSensors}
+        collisionDetection={closestCenter}
+        onDragEnd={handleMachineDragEnd}
+      >
+        <SortableContext items={remoteMachineIds} strategy={verticalListSortingStrategy}>
+          {remoteProjectSections.map((section) => (
+            <SortableSidebarOrderItem
+              key={section.machineId}
+              id={String(section.machineId)}
+              disabled={remoteMachineIds.length < 2}
+              dragHandleLabel="Drag to reorder"
+            >
+              {(machineDragHandle) => (
+                <DemoProjectSection
+                  machineId={section.machineId}
+                  machineName={section.machineName}
+                  label={section.machineName}
+                  projects={section.projects}
+                  collapsed={collapsedSections[section.machineId] ?? false}
+                  machineDragHandle={machineDragHandle}
+                  collapsedProjects={collapsedProjects}
+                  onToggleCollapsed={() => toggleSectionCollapsed(section.machineId)}
+                  onToggleProjectCollapsed={toggleProjectCollapsed}
+                  onProjectsChange={(projects) =>
+                    setRemoteProjectSections((sections) =>
+                      sections.map((item) =>
+                        item.machineId === section.machineId ? { ...item, projects } : item
+                      )
+                    )
                   }
-                  onRequestRemoval={() => {}}
                 />
-              );
-            })}
-          </div>
-        </div>
-      </div>
+              )}
+            </SortableSidebarOrderItem>
+          ))}
+        </SortableContext>
+      </DndContext>
 
       <SidebarSectionHeader
         label="GitHub Worktrees"

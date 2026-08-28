@@ -1,4 +1,21 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  sortableKeyboardCoordinates,
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { startSessionMentionDrag } from '@/lib/session-mention-drag';
 import { useSidebarKeyboardNav } from '@/hooks/use-sidebar-keyboard-nav';
 import { SidebarKeyboardHighlight } from '@/components/sidebar-keyboard-highlight';
@@ -64,8 +81,11 @@ import {
   chatsCollapsedAtom,
   githubWorktreesSectionCollapsedAtom,
   localProjectCollapseStateAtom,
+  localProjectSidebarOrderAtom,
   localProjectsSectionCollapseStateAtom,
+  mergeVisibleSidebarOrder,
   pinnedSectionCollapsedAtom,
+  reconcileVisibleSidebarOrder,
   repoCollapseStateAtom,
   repoOrderAtom,
   sidebarCollapsedAtom,
@@ -141,6 +161,7 @@ import {
   Clock3,
   Folder,
   FolderPlus,
+  GripVertical,
   Link2,
   LockKeyhole,
   Loader2,
@@ -937,6 +958,7 @@ export type LocalProjectItemProps = {
   archiveConfirmLabel: string;
   isMobile: boolean;
   toggleLabel: string;
+  dragHandle?: ReactNode;
   onNavigateProject: (machineId: MachineId, localProjectId: string) => void;
   onNavigateSession: (sessionId: string, tabSessionId?: string) => void;
   onArchive: (sessionId: string) => void;
@@ -976,6 +998,73 @@ function localProjectItemPropsEqual(prev: LocalProjectItemProps, next: LocalProj
   return !contains(prev.selectedSessionId) && !contains(next.selectedSessionId);
 }
 
+export function SortableSidebarOrderItem({
+  id,
+  disabled,
+  dragHandleLabel,
+  children,
+}: {
+  id: string;
+  disabled: boolean;
+  dragHandleLabel: string;
+  children: (dragHandle: ReactNode) => ReactNode;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id, disabled });
+  const constrainedTransform = transform
+    ? {
+        ...transform,
+        x: 0,
+        scaleX: 1,
+        scaleY: 1,
+      }
+    : null;
+  const dragHandle = disabled ? null : (
+    <button
+      type="button"
+      ref={setActivatorNodeRef}
+      className={cn(
+        'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm',
+        'text-sidebar-foreground-muted/80 transition-[opacity,background-color,color] duration-100',
+        'opacity-0 pointer-events-none',
+        'group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto',
+        'hover:bg-sidebar-hover hover:text-sidebar-hover-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring/40',
+        'cursor-grab active:cursor-grabbing'
+      )}
+      aria-label={dragHandleLabel}
+      {...attributes}
+      {...listeners}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+    >
+      <GripVertical className="h-3.5 w-3.5" />
+    </button>
+  );
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(constrainedTransform),
+        transition,
+      }}
+      className={cn('w-full', isDragging && 'opacity-60')}
+      data-sidebar-sortable-id={id}
+    >
+      {children(dragHandle)}
+    </div>
+  );
+}
+
 export const LocalProjectItem = memo(function LocalProjectItem({
   machineId,
   machineName,
@@ -998,6 +1087,7 @@ export const LocalProjectItem = memo(function LocalProjectItem({
   archiveConfirmLabel,
   isMobile,
   toggleLabel,
+  dragHandle,
   onNavigateProject,
   onNavigateSession,
   onArchive,
@@ -1087,6 +1177,7 @@ export const LocalProjectItem = memo(function LocalProjectItem({
               )}
               onClick={handleNavigate}
               onKeyDown={(event) => {
+                if (event.target !== event.currentTarget) return;
                 if (event.key !== 'Enter' && event.key !== ' ') return;
                 event.preventDefault();
                 handleNavigate();
@@ -1120,6 +1211,7 @@ export const LocalProjectItem = memo(function LocalProjectItem({
                 />
               </button>
               <span className="min-w-0 flex-1 truncate text-left">{project.name}</span>
+              {dragHandle}
 
               {removalStateLabel ? (
                 <Tooltip delayDuration={300}>
@@ -1648,6 +1740,11 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
   );
   const [repoCollapseState, setRepoCollapseState] = useAtom(repoCollapseStateAtom);
   const [repoOrder, setRepoOrder] = useAtom(repoOrderAtom);
+  const [localProjectSidebarOrder, setLocalProjectSidebarOrder] = useAtom(
+    localProjectSidebarOrderAtom
+  );
+  const localProjectSidebarOrderRef = useRef(localProjectSidebarOrder);
+  localProjectSidebarOrderRef.current = localProjectSidebarOrder;
   const [localProjectCollapseState, setLocalProjectCollapseState] = useAtom(
     localProjectCollapseStateAtom
   );
@@ -1930,17 +2027,46 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
     // should not appear in the sidebar.
     const showLocalSection = localSection && localSection.projects.length > 0;
 
-    return [...(showLocalSection ? [localSection] : []), ...remoteSections].map((section) => ({
-      ...section,
-      projects: [...section.projects].sort((a, b) => {
-        const aTime = typeof a.createdAtMs === 'number' ? a.createdAtMs : 0;
-        const bTime = typeof b.createdAtMs === 'number' ? b.createdAtMs : 0;
-        if (aTime !== bTime) return aTime - bTime;
-        return a.name.localeCompare(b.name);
-      }),
-    }));
+    const remoteSectionById = new Map(
+      remoteSections.map((section) => [String(section.sectionKey), section])
+    );
+    const orderedRemoteSections = reconcileVisibleSidebarOrder(
+      localProjectSidebarOrder.remoteMachineIds,
+      remoteSections.map((section) => String(section.sectionKey))
+    ).flatMap((sectionId) => {
+      const section = remoteSectionById.get(sectionId);
+      return section ? [section] : [];
+    });
+
+    return [...(showLocalSection ? [localSection] : []), ...orderedRemoteSections].map(
+      (section) => {
+        const defaultProjects = [...section.projects].sort((a, b) => {
+          const aTime = typeof a.createdAtMs === 'number' ? a.createdAtMs : 0;
+          const bTime = typeof b.createdAtMs === 'number' ? b.createdAtMs : 0;
+          if (aTime !== bTime) return aTime - bTime;
+          return a.name.localeCompare(b.name);
+        });
+        if (!section.machineId) return { ...section, projects: defaultProjects };
+
+        const projectById = new Map(
+          defaultProjects.map((project) => [String(project.id), project])
+        );
+        const projectIds = reconcileVisibleSidebarOrder(
+          localProjectSidebarOrder.projectIdsByMachineId[section.machineId] ?? [],
+          defaultProjects.map((project) => String(project.id))
+        );
+        return {
+          ...section,
+          projects: projectIds.flatMap((projectId) => {
+            const project = projectById.get(projectId);
+            return project ? [project] : [];
+          }),
+        };
+      }
+    );
   }, [
     localMachineId,
+    localProjectSidebarOrder,
     machineMetaMap,
     pendingLocalProjectRemovals,
     sessionsListLoading,
@@ -2100,6 +2226,10 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
     [t]
   );
   const toggleLabel = useMemo(() => t('common.toggle', 'Toggle'), [t]);
+  const dragToReorderLabel = useMemo(
+    () => t('sessions.messageQueue.dragToReorder', 'Drag to reorder'),
+    [t]
+  );
   const importProjectLabel = useMemo(
     () => t('sidebar.localProjects.import', 'Import local project folder'),
     [t]
@@ -2115,6 +2245,63 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
       }));
     },
     [setLocalProjectsSectionCollapseState]
+  );
+  const sidebarOrderSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
+  const remoteSectionIds = useMemo(
+    () =>
+      localProjectSections
+        .filter((section) => section.kind === 'remote')
+        .map((section) => String(section.sectionKey)),
+    [localProjectSections]
+  );
+  const handleRemoteSectionDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const overId = event.over?.id;
+      if (!overId) return;
+      const fromIndex = remoteSectionIds.indexOf(String(event.active.id));
+      const toIndex = remoteSectionIds.indexOf(String(overId));
+      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
+
+      const current = localProjectSidebarOrderRef.current;
+      const next = {
+        ...current,
+        remoteMachineIds: mergeVisibleSidebarOrder(
+          current.remoteMachineIds,
+          arrayMove(remoteSectionIds, fromIndex, toIndex)
+        ),
+      };
+      localProjectSidebarOrderRef.current = next;
+      setLocalProjectSidebarOrder(next);
+    },
+    [remoteSectionIds, setLocalProjectSidebarOrder]
+  );
+  const handleProjectDragEnd = useCallback(
+    (machineId: MachineId, projectIds: readonly string[], event: DragEndEvent) => {
+      const overId = event.over?.id;
+      if (!overId) return;
+      const fromIndex = projectIds.indexOf(String(event.active.id));
+      const toIndex = projectIds.indexOf(String(overId));
+      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
+
+      const current = localProjectSidebarOrderRef.current;
+      const savedProjectIds = current.projectIdsByMachineId[machineId] ?? [];
+      const next = {
+        ...current,
+        projectIdsByMachineId: {
+          ...current.projectIdsByMachineId,
+          [machineId]: mergeVisibleSidebarOrder(
+            savedProjectIds,
+            arrayMove([...projectIds], fromIndex, toIndex)
+          ),
+        },
+      };
+      localProjectSidebarOrderRef.current = next;
+      setLocalProjectSidebarOrder(next);
+    },
+    [setLocalProjectSidebarOrder]
   );
 
   const showChats = sessionsListLoading || workspaceChatSessions.length > 0;
@@ -2139,121 +2326,166 @@ export function LoroAppSidebar({ className }: LoroAppSidebarProps) {
     localProjectSections.length === 0 ? null : (
       // Sections carry their own bottom margin (see sidebarTopContent): 12px
       // when expanded, 4px when collapsed so folded sections stack compactly.
-      <div>
-        {localProjectSections.map((section, sectionIndex) => {
-          const sectionCollapsed = localProjectsSectionCollapseState[section.sectionKey] ?? false;
-          const headerFilter = sectionIndex === 0 ? sidebarFilterPlaceholder : null;
-          const dividerRight =
-            section.canImport && isElectron ? (
-              <button
-                type="button"
-                className={cn(
-                  'inline-flex h-6 w-6 items-center justify-center rounded-sm',
-                  'text-muted-foreground/80 hover:bg-muted/30 hover:text-foreground',
-                  'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/60'
-                )}
-                aria-label={importProjectLabel}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void handleImportLocalProject();
-                }}
-              >
-                <FolderPlus className="h-4 w-4" />
-              </button>
-            ) : undefined;
-          const headerAction =
-            dividerRight || headerFilter ? (
-              <div className="flex items-center gap-1">
-                {dividerRight}
-                {headerFilter}
-              </div>
-            ) : undefined;
+      <DndContext
+        sensors={sidebarOrderSensors}
+        collisionDetection={closestCenter}
+        onDragEnd={handleRemoteSectionDragEnd}
+      >
+        <SortableContext items={remoteSectionIds} strategy={verticalListSortingStrategy}>
+          <div>
+            {localProjectSections.map((section, sectionIndex) => {
+              const sectionCollapsed =
+                localProjectsSectionCollapseState[section.sectionKey] ?? false;
+              const headerFilter = sectionIndex === 0 ? sidebarFilterPlaceholder : null;
+              const projectIds = section.projects.map((project) => String(project.id));
+              const renderSection = (machineDragHandle: ReactNode) => {
+                const dividerRight =
+                  section.canImport && isElectron ? (
+                    <button
+                      type="button"
+                      className={cn(
+                        'inline-flex h-6 w-6 items-center justify-center rounded-sm',
+                        'text-muted-foreground/80 hover:bg-muted/30 hover:text-foreground',
+                        'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/60'
+                      )}
+                      aria-label={importProjectLabel}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleImportLocalProject();
+                      }}
+                    >
+                      <FolderPlus className="h-4 w-4" />
+                    </button>
+                  ) : undefined;
+                const headerAction =
+                  dividerRight || headerFilter || machineDragHandle ? (
+                    <div className="flex items-center gap-1">
+                      {dividerRight}
+                      {headerFilter}
+                      {machineDragHandle}
+                    </div>
+                  ) : undefined;
 
-          return (
-            <div
-              key={section.sectionKey}
-              className={cn('space-y-0.5', sectionCollapsed ? 'mb-1 last:mb-0' : 'mb-3 last:mb-0')}
-            >
-              <SidebarSectionHeader
-                icon={
-                  section.kind === 'remote' ? (
-                    <Monitor className="h-3.5 w-3.5 shrink-0 opacity-80" aria-hidden="true" />
-                  ) : undefined
-                }
-                label={section.sectionLabel}
-                collapsed={sectionCollapsed}
-                action={headerAction}
-                isMobile={isMobile}
-                toggleLabel={toggleLabel}
-                onToggleCollapsed={() => handleToggleLocalProjectsSection(section.sectionKey)}
-              />
+                return (
+                  <div
+                    key={section.sectionKey}
+                    className={cn(
+                      'space-y-0.5',
+                      sectionCollapsed ? 'mb-1 last:mb-0' : 'mb-3 last:mb-0'
+                    )}
+                  >
+                    <SidebarSectionHeader
+                      icon={
+                        section.kind === 'remote' ? (
+                          <Monitor className="h-3.5 w-3.5 shrink-0 opacity-80" aria-hidden="true" />
+                        ) : undefined
+                      }
+                      label={section.sectionLabel}
+                      collapsed={sectionCollapsed}
+                      action={headerAction}
+                      isMobile={isMobile}
+                      toggleLabel={toggleLabel}
+                      onToggleCollapsed={() => handleToggleLocalProjectsSection(section.sectionKey)}
+                    />
 
-              {sectionCollapsed ? null : (
-                <div className="space-y-1">
-                  {section.projects.map((project) => {
-                    const machineId = section.machineId;
-                    if (!machineId) return null;
-                    const projectKey = `${machineId}:${project.id}`;
-                    const collapsed = localProjectCollapseState[projectKey] ?? false;
-                    const sessionsForProject =
-                      workspaceLocalProjectSessionsByKey.get(projectKey) ?? [];
-                    const isSelected = projectKey === selectedLocalProjectKey;
-                    const rootPath =
-                      typeof project.rootPath === 'string' ? project.rootPath.trim() : '';
-                    const formattedPath = rootPath ? rootPath : null;
-
-                    return (
-                      <LocalProjectItem
-                        key={project.id}
-                        machineId={machineId}
-                        machineName={section.machineDisplayName}
-                        project={project}
-                        canRemoveProject={section.canRemoveProject}
-                        canNavigateProject={section.canNavigateProject}
-                        removalState={
-                          pendingLocalProjectRemovals.has(projectKey)
-                            ? onlineMachineIds.has(machineId)
-                              ? 'removing'
-                              : 'waiting_for_device'
-                            : null
+                    {sectionCollapsed || !section.machineId ? null : (
+                      <DndContext
+                        sensors={sidebarOrderSensors}
+                        collisionDetection={closestCenter}
+                        onDragEnd={(event) =>
+                          handleProjectDragEnd(section.machineId!, projectIds, event)
                         }
-                        collapsed={collapsed}
-                        isSelected={isSelected}
-                        sessionsForProject={sessionsForProject}
-                        childSessionsByParent={childSessionsByParent}
-                        liveSessionStatuses={liveSessionStatuses}
-                        resolveSessionAuthor={resolveSessionAuthor}
-                        formattedPath={formattedPath}
-                        defaultSessionTitle={defaultSessionTitle}
-                        selectedSessionId={selectedSessionId}
-                        removeProjectLabel={removeProjectLabel}
-                        archiveTooltipLabel={archiveTooltipLabel}
-                        archiveActionLabel={archiveActionLabel}
-                        archiveConfirmLabel={archiveConfirmLabel}
-                        isMobile={isMobile}
-                        toggleLabel={toggleLabel}
-                        onNavigateProject={handleNavigateToProject}
-                        onNavigateSession={handleNavigateToSession}
-                        onArchive={handleArchiveSession}
-                        onRenameSession={handleRenameSession}
-                        onToggleSessionPinned={handleTogglePinSession}
-                        onCopySessionUrl={handleCopySessionUrl}
-                        onShareSessionWithTeam={handleRequestShareSession}
-                        sessionSharingById={sessionSharingById}
-                        collapsedOpenedBySessionIds={collapsedOpenedBySessionIds}
-                        onToggleOpenedBySessions={handleToggleOpenedBySessions}
-                        resolveOpenerRowId={resolveOpenerRowId}
-                        onToggleCollapsed={toggleLocalProjectCollapsed}
-                        onRequestRemoval={handleRequestRemoval}
-                      />
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+                      >
+                        <SortableContext items={projectIds} strategy={verticalListSortingStrategy}>
+                          <div className="space-y-1">
+                            {section.projects.map((project) => {
+                              const machineId = section.machineId!;
+                              const projectKey = `${machineId}:${project.id}`;
+                              const collapsed = localProjectCollapseState[projectKey] ?? false;
+                              const sessionsForProject =
+                                workspaceLocalProjectSessionsByKey.get(projectKey) ?? [];
+                              const isSelected = projectKey === selectedLocalProjectKey;
+                              const rootPath =
+                                typeof project.rootPath === 'string' ? project.rootPath.trim() : '';
+                              const formattedPath = rootPath ? rootPath : null;
+                              const removalState = pendingLocalProjectRemovals.has(projectKey)
+                                ? onlineMachineIds.has(machineId)
+                                  ? 'removing'
+                                  : 'waiting_for_device'
+                                : null;
+
+                              return (
+                                <SortableSidebarOrderItem
+                                  key={project.id}
+                                  id={String(project.id)}
+                                  disabled={projectIds.length < 2 || removalState !== null}
+                                  dragHandleLabel={dragToReorderLabel}
+                                >
+                                  {(projectDragHandle) => (
+                                    <LocalProjectItem
+                                      machineId={machineId}
+                                      machineName={section.machineDisplayName}
+                                      project={project}
+                                      canRemoveProject={section.canRemoveProject}
+                                      canNavigateProject={section.canNavigateProject}
+                                      removalState={removalState}
+                                      collapsed={collapsed}
+                                      isSelected={isSelected}
+                                      sessionsForProject={sessionsForProject}
+                                      childSessionsByParent={childSessionsByParent}
+                                      liveSessionStatuses={liveSessionStatuses}
+                                      resolveSessionAuthor={resolveSessionAuthor}
+                                      formattedPath={formattedPath}
+                                      defaultSessionTitle={defaultSessionTitle}
+                                      selectedSessionId={selectedSessionId}
+                                      removeProjectLabel={removeProjectLabel}
+                                      archiveTooltipLabel={archiveTooltipLabel}
+                                      archiveActionLabel={archiveActionLabel}
+                                      archiveConfirmLabel={archiveConfirmLabel}
+                                      isMobile={isMobile}
+                                      toggleLabel={toggleLabel}
+                                      dragHandle={projectDragHandle}
+                                      onNavigateProject={handleNavigateToProject}
+                                      onNavigateSession={handleNavigateToSession}
+                                      onArchive={handleArchiveSession}
+                                      onRenameSession={handleRenameSession}
+                                      onToggleSessionPinned={handleTogglePinSession}
+                                      onCopySessionUrl={handleCopySessionUrl}
+                                      onShareSessionWithTeam={handleRequestShareSession}
+                                      sessionSharingById={sessionSharingById}
+                                      collapsedOpenedBySessionIds={collapsedOpenedBySessionIds}
+                                      onToggleOpenedBySessions={handleToggleOpenedBySessions}
+                                      resolveOpenerRowId={resolveOpenerRowId}
+                                      onToggleCollapsed={toggleLocalProjectCollapsed}
+                                      onRequestRemoval={handleRequestRemoval}
+                                    />
+                                  )}
+                                </SortableSidebarOrderItem>
+                              );
+                            })}
+                          </div>
+                        </SortableContext>
+                      </DndContext>
+                    )}
+                  </div>
+                );
+              };
+
+              if (section.kind === 'local') return renderSection(null);
+              return (
+                <SortableSidebarOrderItem
+                  key={section.sectionKey}
+                  id={String(section.sectionKey)}
+                  disabled={remoteSectionIds.length < 2}
+                  dragHandleLabel={dragToReorderLabel}
+                >
+                  {renderSection}
+                </SortableSidebarOrderItem>
+              );
+            })}
+          </div>
+        </SortableContext>
+      </DndContext>
     );
 
   // Compute repos array from persisted state
